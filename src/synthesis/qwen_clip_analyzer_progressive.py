@@ -503,6 +503,26 @@ KEY RULES:
 - TRIM MUST EXCLUDE DEAD AIR: If dead air gaps exist INSIDE your suggested_trim_start→suggested_trim_end range, your trim is wrong. Either (a) narrow the trim to cut around the gaps so no dead air remains in the clip, or (b) if the interesting content spans both sides of a dead air gap with no clean narrow, discard the clip (score ≤ 3). A clean clip has continuous speech/vocalization from trim_start to trim_end.
 - SILENCE ≠ AMBIENT: Ambient (low-fi music, rain sounds) is a deliberate atmosphere choice. Dead air is silence with nothing happening — the streamer stopped talking, there's no music, no content. Differentiate these.
 
+SCORING RUBRIC (be strict and narrative-first):
+- 9-10: Exceptional, highly clip-worthy. Clear setup + payoff, emotionally resonant, specific moment, minimal filler.
+- 7-8: Strong clip candidate. Clear story/joke/banter arc with payoff and good standalone clarity.
+- 5-6: Borderline. Some interesting signal, but weak payoff OR too context-dependent OR pacing issues.
+- 3-4: Weak. Mostly transactional reaction, generic chatter, or limited narrative progression.
+- 1-2: Poor. Ambient/dead air/no clear moment.
+
+HARD CAPS:
+- If narrative_type == transactional_reaction and there is NO explanation/inside-joke arc for new viewers, clip_worthiness MUST be ≤ 4.
+- If has_narrative_payoff == false, clip_worthiness MUST be ≤ 5.
+- If requires_context == true and the moment is not understandable as a standalone clip, clip_worthiness MUST be ≤ 5.
+- If clip_point/title is generic (could apply to any stream), clip_worthiness MUST be ≤ 5.
+
+HIGH-SCORE GATE:
+- To assign clip_worthiness >= 7, the moment MUST have all of:
+  (1) clear trigger,
+  (2) clear payoff,
+  (3) specific title angle,
+  (4) non-transactional narrative value.
+
 Use the PLATFORM SCORING GUIDE below to evaluate platform-specific clip value.
 
 {platform_guide}
@@ -569,7 +589,12 @@ IMPORTANT RULES:
 - PLATFORM RULE: For each clip, provide platform_recommendations — an explicit list of which platforms to actually post to. Only include platforms where the clip genuinely fits (score >= 6). Can recommend multiple platforms. Empty list if none.
 - TRIM RULE: Narrow suggested_trim_start/end as much as you can, but provide trim_start_reason and trim_end_reason explaining WHY those seconds are the boundaries (reference transcript timestamps).
 - STRONG PREFERENCE: Do NOT return the full candidate window when it's 120s unless absolutely necessary. Default to 20-60s trims; allow 60-90s only when there is clear multi-beat narrative continuity and no filler.
-- RMS FALLBACK POLICY: Audio RMS fallback is a last resort for unresolved full-window 120s outputs. Your trim should stand on its own whenever possible."""
+- RMS FALLBACK POLICY: Audio RMS fallback is a last resort for unresolved full-window 120s outputs. Your trim should stand on its own whenever possible.
+- SELECTION GATE (strict): Prefer including clips with score >= 7. 5-6 is borderline and should usually be excluded unless it has clear narrative payoff and strong platform fit. <=4 should be excluded.
+- TRANSACTIONAL GATE: A transactional_reaction clip should be excluded by default unless it includes a genuine explanation/story arc (e.g., inside joke explained to new viewers).
+- STANDALONE GATE: Exclude clips that require too much outside context to be understood.
+- FULL-WINDOW GATE: If a selected clip still uses the full 120s candidate window without a compelling justification, down-rank or exclude it.
+- OUTPUT QUALITY OVER QUANTITY: It's better to output fewer high-quality clips than many mediocre clips."""
 
 FRAME_REVIEW_PROMPT = """You previously analysed a clip at {start}s - {end}s ("{clip_title}") from the VOD "{vod_title}".
 
@@ -643,6 +668,12 @@ IMPORTANT RULES:
 - DEAD AIR RULE: Check for ⚠️ DEAD AIR DETECTED in the analysis log. If a single silence gap > 10 seconds exists, that clip must have a -5 penalty applied (max final score 5/10). If total silence > 30% of window, score ≤ 5. Discard clips with unacceptable dead air. Ambient atmosphere is NOT dead air — differentiate.
 - For each selected clip, provide suggested_trim_start and suggested_trim_end to capture only the relevant moment.
 - STRONG PREFERENCE: Avoid full-window outputs, especially 120s full windows. Default to 20-60s trims. Use 60-90s only when a complete multi-beat narrative requires it and there is no filler.
+- FINAL SELECTION GATE (strict): Include primarily clips with score >= 7 and clear setup→payoff narrative value.
+- BORDERLINE RULE: Score 5-6 clips should usually be excluded unless they are uniquely strong for a specific platform and still have a clear payoff.
+- TRANSACTIONAL RULE: transactional_reaction clips are excluded by default unless they contain a clear explanation/inside-joke arc that creates standalone narrative value.
+- STANDALONE RULE: Exclude clips that are confusing without prior stream context.
+- FULL-WINDOW RULE: If trim remains the full 120s candidate with no compelling reason, exclude or heavily down-rank.
+- QUALITY > QUANTITY: Prefer a short list of high-confidence clips over a long list of mediocre ones.
 
 {platform_guide}"""
 
