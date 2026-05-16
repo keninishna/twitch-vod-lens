@@ -477,8 +477,8 @@ NO DUPLICATE TITLES: Check the batch_context for already-used titles (title_give
   "narrative_type": "storytelling|chat_banter|transactional_reaction|organic_reaction|ambient|other",
   "has_narrative_payoff": true/false,
   "requires_context": true/false,
-  "suggested_trim_start": "CRITICAL: Narrow to EXACT second the interesting moment starts. The input is ~2 min. You MUST narrow to 15-30s. Return clip_start ONLY if the moment truly starts at the very beginning. Use transcript timestamps above to pinpoint the exact second.",
-  "suggested_trim_end": "CRITICAL: Narrow to EXACT second the payoff ends. You MUST narrow to 15-30s total. Return clip_end ONLY if the moment truly lasts the full window. Be ruthless about cutting dead air.",
+  "suggested_trim_start": "CRITICAL: Narrow to EXACT second the interesting moment starts. The input is ~2 min. You MUST usually narrow to 15-45s (up to 60s only when the narrative truly needs it). Return clip_start ONLY if the moment truly starts at the very beginning.",
+  "suggested_trim_end": "CRITICAL: Narrow to EXACT second the payoff ends. You MUST usually keep total length 15-45s (up to 60s only when clearly justified). Returning the full input window should be rare and only when every second is essential.",
   "trim_start_reason": "WHY this exact second is where the interesting moment begins — reference the transcript timestamp that triggers it (e.g. 'donation alert at 885s' or 'story starts at 890s')",
   "trim_end_reason": "WHY this exact second is where the moment ends — reference what finishes (e.g. 'laughing ends by 915s' or 'punchline lands at 905s')",
   "narrative_arc": "Chronological summary of what happens in this clip window: what triggers each moment (donation alert? chat message? story?), what the streamer does, and what the actual interesting moment is.",
@@ -567,7 +567,9 @@ IMPORTANT RULES:
 - DEDUP RULE: Each clip has a unique clip_id (e.g. 'Clip at 998s'). NEVER assign the same clip_point/title to two different clips. If two clips have similar content, differentiate their titles. When in doubt, reference the clip_id as an anchor.
 - TITLE RULE: Each clip's clip_point MUST be a click-worthy title following one of the proven patterns (reaction pattern, question bait, punchy one-liner, etc.). The title should make someone WANT to click, not just describe what happens.
 - PLATFORM RULE: For each clip, provide platform_recommendations — an explicit list of which platforms to actually post to. Only include platforms where the clip genuinely fits (score >= 6). Can recommend multiple platforms. Empty list if none.
-- TRIM RULE: Narrow suggested_trim_start/end as much as you can, but provide trim_start_reason and trim_end_reason explaining WHY those seconds are the boundaries (reference transcript timestamps). The system will handle final narrowing via audio analysis. Your reasons guide the extraction."""
+- TRIM RULE: Narrow suggested_trim_start/end as much as you can, but provide trim_start_reason and trim_end_reason explaining WHY those seconds are the boundaries (reference transcript timestamps).
+- STRONG PREFERENCE: Do NOT return the full candidate window when it's 120s unless absolutely necessary. Most good clips should be narrowed to 15-45s (up to 60s when justified).
+- RMS FALLBACK POLICY: Audio RMS fallback is a last resort for unresolved full-window 120s outputs. Your trim should stand on its own whenever possible."""
 
 FRAME_REVIEW_PROMPT = """You previously analysed a clip at {start}s - {end}s ("{clip_title}") from the VOD "{vod_title}".
 
@@ -640,6 +642,7 @@ IMPORTANT RULES:
 - DEDUP RULE: Each clip has a unique clip_id (e.g. 'Clip at 998s'). NEVER assign the same clip_point/title to two different clips. Each clip MUST have a unique title. Differentiate similar clips by focusing on what makes each moment distinct.
 - DEAD AIR RULE: Check for ⚠️ DEAD AIR DETECTED in the analysis log. If a single silence gap > 10 seconds exists, that clip must have a -5 penalty applied (max final score 5/10). If total silence > 30% of window, score ≤ 5. Discard clips with unacceptable dead air. Ambient atmosphere is NOT dead air — differentiate.
 - For each selected clip, provide suggested_trim_start and suggested_trim_end to capture only the relevant moment.
+- STRONG PREFERENCE: Avoid full-window outputs, especially 120s full windows. Most selected clips should be narrowed to 15-45s (up to 60s only when clearly justified by the narrative arc).
 
 {platform_guide}"""
 
@@ -1135,13 +1138,19 @@ def run():
             trim_end = raw_end
 
         width = trim_end - trim_start
+        candidate_width = raw_end - raw_start
         is_full_window = (trim_start == raw_start and trim_end == raw_end)
 
         if not is_full_window:
             log(f"  Clip at {raw_start}s: Qwen narrowed to {width}s ({trim_start}-{trim_end}s) — trusting Qwen's reasoning")
             continue
 
-        log(f"  Clip at {raw_start}s: Qwen returned full {width}s window — finding moment via audio RMS...")
+        # RMS fallback policy: only run RMS when Qwen returned the full 120s candidate window.
+        if candidate_width != 120:
+            log(f"  Clip at {raw_start}s: Qwen returned full {candidate_width}s window (not 120s) — keeping Qwen trim, skipping RMS")
+            continue
+
+        log(f"  Clip at {raw_start}s: Qwen returned full 120s window — finding moment via audio RMS...")
 
         # Use ffmpeg to extract per-second RMS energy
         try:
