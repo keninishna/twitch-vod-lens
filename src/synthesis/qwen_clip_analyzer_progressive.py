@@ -477,8 +477,8 @@ NO DUPLICATE TITLES: Check the batch_context for already-used titles (title_give
   "narrative_type": "storytelling|chat_banter|transactional_reaction|organic_reaction|ambient|other",
   "has_narrative_payoff": true/false,
   "requires_context": true/false,
-  "suggested_trim_start": "CRITICAL: Narrow to EXACT second the interesting moment starts. The input is ~2 min. You MUST usually narrow to 15-45s (up to 60s only when the narrative truly needs it). Return clip_start ONLY if the moment truly starts at the very beginning.",
-  "suggested_trim_end": "CRITICAL: Narrow to EXACT second the payoff ends. You MUST usually keep total length 15-45s (up to 60s only when clearly justified). Returning the full input window should be rare and only when every second is essential.",
+  "suggested_trim_start": "CRITICAL: Narrow to EXACT second the interesting moment starts. The input is ~2 min. You MUST usually narrow to 20-60s total; 60-90s only for multi-beat story arcs; >90s is rare and must be explicitly justified. Return clip_start ONLY if the moment truly starts at the very beginning.",
+  "suggested_trim_end": "CRITICAL: Narrow to EXACT second the payoff ends. Keep only the high-value segment: usually 20-60s, sometimes 60-90s for clear narrative continuity. Returning the full input window should be extremely rare and only when every second is essential.",
   "trim_start_reason": "WHY this exact second is where the interesting moment begins — reference the transcript timestamp that triggers it (e.g. 'donation alert at 885s' or 'story starts at 890s')",
   "trim_end_reason": "WHY this exact second is where the moment ends — reference what finishes (e.g. 'laughing ends by 915s' or 'punchline lands at 905s')",
   "narrative_arc": "Chronological summary of what happens in this clip window: what triggers each moment (donation alert? chat message? story?), what the streamer does, and what the actual interesting moment is.",
@@ -568,7 +568,7 @@ IMPORTANT RULES:
 - TITLE RULE: Each clip's clip_point MUST be a click-worthy title following one of the proven patterns (reaction pattern, question bait, punchy one-liner, etc.). The title should make someone WANT to click, not just describe what happens.
 - PLATFORM RULE: For each clip, provide platform_recommendations — an explicit list of which platforms to actually post to. Only include platforms where the clip genuinely fits (score >= 6). Can recommend multiple platforms. Empty list if none.
 - TRIM RULE: Narrow suggested_trim_start/end as much as you can, but provide trim_start_reason and trim_end_reason explaining WHY those seconds are the boundaries (reference transcript timestamps).
-- STRONG PREFERENCE: Do NOT return the full candidate window when it's 120s unless absolutely necessary. Most good clips should be narrowed to 15-45s (up to 60s when justified).
+- STRONG PREFERENCE: Do NOT return the full candidate window when it's 120s unless absolutely necessary. Default to 20-60s trims; allow 60-90s only when there is clear multi-beat narrative continuity and no filler.
 - RMS FALLBACK POLICY: Audio RMS fallback is a last resort for unresolved full-window 120s outputs. Your trim should stand on its own whenever possible."""
 
 FRAME_REVIEW_PROMPT = """You previously analysed a clip at {start}s - {end}s ("{clip_title}") from the VOD "{vod_title}".
@@ -642,7 +642,7 @@ IMPORTANT RULES:
 - DEDUP RULE: Each clip has a unique clip_id (e.g. 'Clip at 998s'). NEVER assign the same clip_point/title to two different clips. Each clip MUST have a unique title. Differentiate similar clips by focusing on what makes each moment distinct.
 - DEAD AIR RULE: Check for ⚠️ DEAD AIR DETECTED in the analysis log. If a single silence gap > 10 seconds exists, that clip must have a -5 penalty applied (max final score 5/10). If total silence > 30% of window, score ≤ 5. Discard clips with unacceptable dead air. Ambient atmosphere is NOT dead air — differentiate.
 - For each selected clip, provide suggested_trim_start and suggested_trim_end to capture only the relevant moment.
-- STRONG PREFERENCE: Avoid full-window outputs, especially 120s full windows. Most selected clips should be narrowed to 15-45s (up to 60s only when clearly justified by the narrative arc).
+- STRONG PREFERENCE: Avoid full-window outputs, especially 120s full windows. Default to 20-60s trims. Use 60-90s only when a complete multi-beat narrative requires it and there is no filler.
 
 {platform_guide}"""
 
@@ -652,47 +652,49 @@ IMPORTANT RULES:
 PLATFORM_SCORING_GUIDE = """
 PLATFORM SCORING GUIDE — Rate each clip on every platform (1-10).
 
+RESEARCH-BACKED LENGTH + RETENTION PRINCIPLES:
+- Universal: strongest hooks happen in the first 2-3 seconds.
+- Universal: completion/retention usually beats raw duration; do not add dead time.
+- Universal trim policy for this pipeline:
+  - 15-30s: quick punchline/reaction bits
+  - 30-60s: default sweet spot for story + payoff
+  - 60-90s: only when a multi-beat narrative clearly needs it
+  - >90s: rare, usually Twitch-only unless exceptional
+
 TIKTOK (score 1-10):
-- Hook: Does the first 3 seconds grab attention? (alert sound, sudden movement, visual change, punchline start)
-- Pacing: Fast cuts or rapid dialogue? Slow/ambient clips score low (3 or less).
-- Vertical framing: Is the streamer's face centered and visible in 9:16 crop?
-- Text overlay potential: Can key dialogue be captioned on screen?
-- Trend audio sync: Does the moment sync with a potential audio trend?
-- Loopability: Does the end lead back to the start? (highly desirable)
-- Ideal length: 15-60 seconds. Clips under 15s or over 60s penalized.
+- Hook in first 2s is mandatory.
+- Strong pattern from large-post analysis: videos >60s can outperform shorter ones on reach/watch time IF pacing stays strong.
+- Because this pipeline outputs clipped moments (not full essays), prioritize:
+  - 25-45s for punchy bits
+  - 45-75s for clear story arc
+  - Avoid >90s unless unusually compelling.
+- Loopability, captionability, and fast payoff still matter more than absolute length.
 
 YOUTUBE SHORTS (score 1-10):
-- Loopability: Seamless start-to-end loop potential (critical for Shorts)
-- Info density: Something interesting happens every 5-10 seconds
-- Thumbnail potential: Is there a single frame that works as a thumbnail?
-- Self-contained: Works without Twitch community knowledge
-- Replay value: Would someone watch this more than once?
-- Ideal length: 15-60 seconds
+- Shorts creation supports up to 3 minutes, but clip discovery still rewards concise, rewatchable moments.
+- Prioritize 20-50s for most moments.
+- Use 50-90s only when there is clear narrative progression with no filler.
+- Score down clips that require niche context or have slow ramps.
 
 TWITTER / X (score 1-10):
-- Context independence: Makes sense to someone who doesn't know the streamer
-- Punchline density: Clear punchline or surprising moment
-- Quote-tweet bait: Invites commentary or sharing
-- Engagement hook: Makes you want to reply or react
-- Length tolerance: 30-120 seconds accepted (longer than TikTok)
-- Horizontal format: Twitter viewers tolerate horizontal video better
+- Context independence + quote-tweet bait matter most.
+- Preferred range: 20-60s (punchy and shareable).
+- 60-90s acceptable if payoff stays strong.
+- Penalize meandering clips even if emotional.
 
 TWITCH CLIPS (score 1-10):
-- Streamer personality: Does this showcase who the streamer is?
-- Community in-joke: Will regular viewers recognize and share?
-- Emote potential: Does this generate emote-spam moments?
-- Emotional range: Rage, joy, surprise, laughter — genuine emotions score higher
-- Chat interaction: Does the streamer engage with chat?
-- Context dependence: OK if it requires community knowledge (expected for Twitch)
-- Length: 30-120 seconds OK, horizontal format preferred
+- Platform-native clips are short highlights (typically 5-60s).
+- Favor personality, chat interplay, and emote-spam potential.
+- Best range here: 20-60s; only exceed 60 when story continuity clearly requires it.
 
 INSTAGRAM REELS (score 1-10):
-- Visual aesthetic: Well-lit, composed, visually interesting?
-- Shareability: Would someone send this to a friend via DM?
-- Text overlay compatibility: Can key moments be highlighted with text?
-- Niche community fit: Does this appeal to a specific Instagram niche?
-- Polished production: Higher bar for visual quality
-- Ideal length: 15-60 seconds, vertical format required
+- Reels can be longer, but discovery tends to favor shorter cuts.
+- Strong practical target: <=90s, with best general distribution often under 90.
+- Preferred range in this pipeline:
+  - 20-45s for punchy shareability
+  - 45-75s for narrative bits
+  - 75-90s only if every beat contributes.
+- Prioritize visual clarity, subtitle readability, and first-3-second hook.
 """
 
 
