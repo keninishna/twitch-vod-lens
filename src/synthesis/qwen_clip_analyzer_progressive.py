@@ -117,6 +117,42 @@ def qwen_call(payload, timeout=90):
     except Exception as e:
         return {"error": str(e), "clip_worthy": 0}
 
+
+def _to_int_or_none(v):
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def duration_penalty_seconds(trim_start, trim_end):
+    """
+    Research-guided duration penalty for short-form clip viability.
+
+    Returns: (penalty_points, duration_seconds)
+
+    Target policy:
+      - Optimal: 25-60s      -> 0 penalty
+      - Acceptable: 20-24s   -> -1
+      - Acceptable: 61-75s   -> -1
+      - Risky: 15-19s        -> -2
+      - Risky: 76-90s        -> -2
+      - Poor fit: <15 or >90 -> -3
+    """
+    ts = _to_int_or_none(trim_start)
+    te = _to_int_or_none(trim_end)
+    if ts is None or te is None or te <= ts:
+        return 3, None
+
+    dur = te - ts
+    if 25 <= dur <= 60:
+        return 0, dur
+    if 20 <= dur <= 24 or 61 <= dur <= 75:
+        return 1, dur
+    if 15 <= dur <= 19 or 76 <= dur <= 90:
+        return 2, dur
+    return 3, dur
+
 def sample_clip_frames(clip, count=FRAMES_PER_CLIP, frame_spread=FRAME_SPREAD):
     """
     Return (frame_paths, timestamps) for a clip window.
@@ -477,8 +513,10 @@ NO DUPLICATE TITLES: Check the batch_context for already-used titles (title_give
   "narrative_type": "storytelling|chat_banter|transactional_reaction|organic_reaction|ambient|other",
   "has_narrative_payoff": true/false,
   "requires_context": true/false,
-  "suggested_trim_start": "CRITICAL: Narrow to EXACT second the interesting moment starts. The input is ~2 min. You MUST usually narrow to 20-60s total; 60-90s only for multi-beat story arcs; >90s is rare and must be explicitly justified. Return clip_start ONLY if the moment truly starts at the very beginning.",
-  "suggested_trim_end": "CRITICAL: Narrow to EXACT second the payoff ends. Keep only the high-value segment: usually 20-60s, sometimes 60-90s for clear narrative continuity. Returning the full input window should be extremely rare and only when every second is essential.",
+  "suggested_trim_start": "CRITICAL: Narrow to EXACT second the interesting moment starts. Return clip_start ONLY if the moment truly starts at the very beginning.",
+  "suggested_trim_end": "CRITICAL: Narrow to EXACT second the payoff ends. Returning the full input window should be extremely rare and only when every second is essential.",
+  "trim_duration_seconds": "INTEGER = suggested_trim_end - suggested_trim_start",
+  "duration_penalty_applied": "INTEGER 0..3 based on DURATION POLICY below (0 optimal, 3 worst)",
   "trim_start_reason": "WHY this exact second is where the interesting moment begins — reference the transcript timestamp that triggers it (e.g. 'donation alert at 885s' or 'story starts at 890s')",
   "trim_end_reason": "WHY this exact second is where the moment ends — reference what finishes (e.g. 'laughing ends by 915s' or 'punchline lands at 905s')",
   "narrative_arc": "Chronological summary of what happens in this clip window: what triggers each moment (donation alert? chat message? story?), what the streamer does, and what the actual interesting moment is.",
@@ -502,6 +540,17 @@ KEY RULES:
 - DEAD AIR RULE: Check the transcript timestamps and the ⚠️ DEAD AIR DETECTED warning above. If the ⚠️ DEAD AIR DETECTED warning shows a single silence gap > 10 seconds, that's a DEAD AIR CLIP — clip_worthiness MUST get a -5 PENALTY (max score 5/10). Example: if it would score 8, score becomes 3. If it would score 7, score becomes 2. A clip with 10+ seconds of dead silence is useless for content.
 - TRIM MUST EXCLUDE DEAD AIR: If dead air gaps exist INSIDE your suggested_trim_start→suggested_trim_end range, your trim is wrong. Either (a) narrow the trim to cut around the gaps so no dead air remains in the clip, or (b) if the interesting content spans both sides of a dead air gap with no clean narrow, discard the clip (score ≤ 3). A clean clip has continuous speech/vocalization from trim_start to trim_end.
 - SILENCE ≠ AMBIENT: Ambient (low-fi music, rain sounds) is a deliberate atmosphere choice. Dead air is silence with nothing happening — the streamer stopped talking, there's no music, no content. Differentiate these.
+- DURATION POLICY (research-guided):
+  - Optimal trim range: 25-60s (best retention + payoff for clipped moments)
+  - Acceptable: 20-24s or 61-75s
+  - Risky: 15-19s or 76-90s
+  - Poor fit: <15s or >90s
+- DURATION PENALTY: Compute trim_duration_seconds = suggested_trim_end - suggested_trim_start and apply penalty to clip_worthiness:
+  - Optimal 25-60s: penalty 0
+  - Acceptable 20-24s or 61-75s: penalty -1
+  - Risky 15-19s or 76-90s: penalty -2
+  - Poor fit <15s or >90s: penalty -3
+- Final clip_worthiness MUST reflect this penalty. Set duration_penalty_applied explicitly.
 
 SCORING RUBRIC (be strict and narrative-first):
 - 9-10: Exceptional, highly clip-worthy. Clear setup + payoff, emotionally resonant, specific moment, minimal filler.
@@ -561,6 +610,8 @@ Return valid JSON only:
       "narrative_type": "storytelling|chat_banter|transactional_reaction|organic_reaction|ambient|other",
       "suggested_trim_start": "CRITICAL: Exact second the moment starts. MUST reference transcript timestamps below.",
       "suggested_trim_end": "CRITICAL: Exact second the moment ends.",
+      "trim_duration_seconds": "INTEGER = suggested_trim_end - suggested_trim_start",
+      "duration_penalty_applied": "INTEGER 0..3 based on DURATION POLICY below (0 optimal, 3 worst)",
       "trim_start_reason": "Cite the exact trigger at this second (e.g. 'donation alert read at 885s', 'chat message appears at 120s', 'streamer starts story at 890s')",
       "trim_end_reason": "Cite what resolves/ends at this second (e.g. 'story payoff lands at 905s', 'laughing dies down by 915s', 'donation reaction ends at 770s')"
     }}}}
@@ -588,6 +639,12 @@ IMPORTANT RULES:
 - TITLE RULE: Each clip's clip_point MUST be a click-worthy title following one of the proven patterns (reaction pattern, question bait, punchy one-liner, etc.). The title should make someone WANT to click, not just describe what happens.
 - PLATFORM RULE: For each clip, provide platform_recommendations — an explicit list of which platforms to actually post to. Only include platforms where the clip genuinely fits (score >= 6). Can recommend multiple platforms. Empty list if none.
 - TRIM RULE: Narrow suggested_trim_start/end as much as you can, but provide trim_start_reason and trim_end_reason explaining WHY those seconds are the boundaries (reference transcript timestamps).
+- DURATION POLICY (research-guided): optimal trim is 25-60s. Acceptable: 20-24s or 61-75s. Risky: 15-19s or 76-90s. Poor fit: <15s or >90s.
+- DURATION PENALTY: apply to the clip score and report duration_penalty_applied + trim_duration_seconds:
+  - Optimal 25-60s: 0
+  - Acceptable 20-24s or 61-75s: -1
+  - Risky 15-19s or 76-90s: -2
+  - Poor fit <15s or >90s: -3
 - STRONG PREFERENCE: Do NOT return the full candidate window when it's 120s unless absolutely necessary. Default to 20-60s trims; allow 60-90s only when there is clear multi-beat narrative continuity and no filler.
 - RMS FALLBACK POLICY: Audio RMS fallback is a last resort for unresolved full-window 120s outputs. Your trim should stand on its own whenever possible.
 - SELECTION GATE (strict): Prefer including clips with score >= 7. 5-6 is borderline and should usually be excluded unless it has clear narrative payoff and strong platform fit. <=4 should be excluded.
@@ -621,6 +678,13 @@ Analyse these extra frames and update your assessment. Return valid JSON only:
   "notes": "any additional observations from these frames"
 }}}}
 
+DURATION POLICY reminder for revised scoring:
+- Optimal trim range is 25-60s.
+- Acceptable: 20-24s or 61-75s.
+- Risky: 15-19s or 76-90s.
+- Poor fit: <15s or >90s.
+- If revised trim is outside optimal, revised_clip_worthiness should reflect that penalty.
+
 Previous analysis: {original_analysis}"""
 
 FINAL_SYNTHESIS_PROMPT = """Here is the COMPLETE analysis log for the VOD "{vod_title}" by {streamer}, including any re-analyses from additional frame reviews:
@@ -651,6 +715,8 @@ Return valid JSON only:
       "narrative_type": "storytelling|chat_banter|transactional_reaction|organic_reaction|ambient|other",
       "suggested_trim_start": "CRITICAL: Exact second the moment starts. MUST reference transcript timestamps.",
       "suggested_trim_end": "CRITICAL: Exact second the moment ends.",
+      "trim_duration_seconds": "INTEGER = suggested_trim_end - suggested_trim_start",
+      "duration_penalty_applied": "INTEGER 0..3 based on DURATION POLICY below (0 optimal, 3 worst)",
       "trim_start_reason": "Cite the exact trigger at this second.",
       "trim_end_reason": "Cite what resolves/ends at this second.",
       "clip_point": "CLICK-WORTHY TITLE (1 sentence max). Use a proven pattern: reaction-based ('Streamer [reaction] after [trigger]'), question bait ('What happens when...?'), or short + punchy ('She had ONE job'). NO dry descriptions.",
@@ -667,6 +733,12 @@ IMPORTANT RULES:
 - DEDUP RULE: Each clip has a unique clip_id (e.g. 'Clip at 998s'). NEVER assign the same clip_point/title to two different clips. Each clip MUST have a unique title. Differentiate similar clips by focusing on what makes each moment distinct.
 - DEAD AIR RULE: Check for ⚠️ DEAD AIR DETECTED in the analysis log. If a single silence gap > 10 seconds exists, that clip must have a -5 penalty applied (max final score 5/10). If total silence > 30% of window, score ≤ 5. Discard clips with unacceptable dead air. Ambient atmosphere is NOT dead air — differentiate.
 - For each selected clip, provide suggested_trim_start and suggested_trim_end to capture only the relevant moment.
+- DURATION POLICY (research-guided): optimal trim is 25-60s. Acceptable: 20-24s or 61-75s. Risky: 15-19s or 76-90s. Poor fit: <15s or >90s.
+- DURATION PENALTY: apply to final score and report duration_penalty_applied + trim_duration_seconds:
+  - Optimal 25-60s: 0
+  - Acceptable 20-24s or 61-75s: -1
+  - Risky 15-19s or 76-90s: -2
+  - Poor fit <15s or >90s: -3
 - STRONG PREFERENCE: Avoid full-window outputs, especially 120s full windows. Default to 20-60s trims. Use 60-90s only when a complete multi-beat narrative requires it and there is no filler.
 - FINAL SELECTION GATE (strict): Include primarily clips with score >= 7 and clear setup→payoff narrative value.
 - BORDERLINE RULE: Score 5-6 clips should usually be excluded unless they are uniquely strong for a specific platform and still have a clear payoff.
