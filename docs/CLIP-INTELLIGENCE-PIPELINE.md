@@ -228,19 +228,41 @@ Phase 3: Qwen 35B (vision) → Final synthesis with audio-filtered scores
 
 **Batch audio script:** `/vods/audio_batch.py` (runs inside Docker container)
 
-### Clip Extraction & Sharing (WORKS)
+### Clip Extraction & Sharing
 
-**Extraction:** ffmpeg stream copy with re-encode to H.264 Main profile:
+A reusable Python script automates the full post-analysis pipeline: read `qwen_vision_progressive.json`, extract clips with browser-compatible ffmpeg, upload to Nextcloud via WebDAV, and create public share links.
+
 ```bash
-ffmpeg -ss START -to END -i input.mp4 -c:v libx264 -profile:v main -level 3.1 -preset fast -crf 23 -c:a aac -movflags +faststart output.mp4
+python src/synthesis/extract_and_upload_clips.py \
+  --json vods/phase4_2770929139/qwen_vision_progressive.json \
+  --vod vods/phase4_2770929139/raw/2770929139.mp4 \
+  --min-score 7 \
+  --output-dir ./clips
 ```
 
-**Upload to Nextcloud:**
-1. SCP clip to fileserver (192.168.1.115)
-2. `docker cp` into nextcloud-nextcloud-app-1 container
-3. `php occ files:scan john`
-4. OCS Share API: `curl -u 'john:NextcloudFan!2025' -X POST 'http://172.18.0.4/ocs/v2.php/apps/files_sharing/api/v1/shares' -d 'path=/VOD-Lens/clip.mp4' -d 'shareType=3' -d 'permissions=1'`
-5. Extract `<url>` from XML response
+**What it does:**
+1. Filters `final_ranking.final_selected_clips` by `score >= --min-score`
+2. Extracts each clip with re-encode (`libx264`, `scale=854:480`, `+faststart`) — **not** stream copy, since raw Twitch VODs are 852×480 non-mod16 and break browser decoders
+3. Uploads directly to Nextcloud via WebDAV PUT from WSL2
+4. Creates public read-only share links via the OCS API
+5. Writes a `share_links.json` manifest
+
+```bash
+# Dry run to preview what would be extracted
+python src/synthesis/extract_and_upload_clips.py \
+  --json qwen_vision_progressive.json \
+  --vod raw/vod.mp4 \
+  --min-score 7 \
+  --dry-run
+```
+
+**Script:** `src/synthesis/extract_and_upload_clips.py`
+
+**Manual fallback (if automation isn't available):**
+```bash
+ffmpeg -ss START -to END -i input.mp4 -c:v libx264 -profile:v main -level 3.1 \
+  -preset medium -crf 18 -vf scale=854:480 -c:a aac -b:a 128k -movflags +faststart output.mp4
+```
 
 ## Infrastructure
 
@@ -310,7 +332,7 @@ git push
 12. ~~Add chat attribution (transcript matching)~~ ✅ Done (CHAT-READ FLAGS)
 13. ~~Add deduplication protection~~ ✅ Done (clip_id, title_given, DEDUP RULE)
 14. ~~Set up GitHub repo~~ ✅ Done (keninishna/twitch-vod-lens)
-15. **Automate clip extraction → upload → share link**
+15. **Automate clip extraction → upload → share link** ✅ Done (`extract_and_upload_clips.py`)
 
 ### Medium Term
 16. End-to-end automation: one command from VOD ID to share links
