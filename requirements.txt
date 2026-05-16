@@ -1,0 +1,8 @@
+faster-whisper>=1.0.0
+scenedetect>=1.0.0
+yt-dlp>=2024.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+ffmpeg-python>=0.2.0
+pydantic>=2.0.0
+torch>=2.0.0

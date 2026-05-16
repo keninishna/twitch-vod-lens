@@ -1,0 +1,11 @@
+vods/
+output/
+__pycache__/
+*.pyc
+*.pt
+*.mp4
+*.mp3
+*.wav
+*.jpg
+.DS_Store
+.env
