@@ -622,6 +622,10 @@ Return valid JSON only:
       "weaknesses": ["list"],
       "narrative_quality": "Narrative assessment: complete story/bit, transactional reaction, or other?",
       "narrative_type": "storytelling|chat_banter|transactional_reaction|organic_reaction|ambient|other",
+      "suggested_trim_start": "CRITICAL: Exact second the moment starts. MUST reference transcript timestamps.",
+      "suggested_trim_end": "CRITICAL: Exact second the moment ends.",
+      "trim_start_reason": "Cite the exact trigger at this second.",
+      "trim_end_reason": "Cite what resolves/ends at this second.",
       "clip_point": "CLICK-WORTHY TITLE (1 sentence max). Use a proven pattern: reaction-based ('Streamer [reaction] after [trigger]'), question bait ('What happens when...?'), or short + punchy ('She had ONE job'). NO dry descriptions.",
     }}}}
   ],
@@ -1182,13 +1186,44 @@ def run():
                 seg_end += 1
 
             seg_len = seg_end - seg_start
-            # Enforce sensible range: 20-60s
-            if seg_len < 20:
-                center = peak_idx
-                half = 10  # at least 10s each side
-                seg_start = max(0, center - half)
-                seg_end = min(len(energies), center + half)
-                seg_len = seg_end - seg_start
+
+            # Build a broader envelope with a looser threshold so short peaks can
+            # still expand into a natural moment window (instead of collapsing to
+            # fixed-length clips).
+            broad_threshold = music_floor + (peak_rms - music_floor) * 0.05
+            broad_start = peak_idx
+            broad_end = peak_idx + 1
+            while broad_start > 0 and energies[broad_start - 1] > broad_threshold:
+                broad_start -= 1
+            while broad_end < len(energies) and energies[broad_end] > broad_threshold:
+                broad_end += 1
+
+            # Enforce sensible range: 15-60s, but keep duration dynamic.
+            if seg_len < 15:
+                # Prefer the broader natural envelope first.
+                if (broad_end - broad_start) > seg_len:
+                    seg_start, seg_end = broad_start, broad_end
+                    seg_len = seg_end - seg_start
+
+                # If still too short, pad around peak only as much as needed.
+                if seg_len < 15:
+                    target_len = 15
+                    need = target_len - seg_len
+                    left = need // 2
+                    right = need - left
+                    seg_start = max(0, seg_start - left)
+                    seg_end = min(len(energies), seg_end + right)
+                    seg_len = seg_end - seg_start
+
+                    # If we hit an edge, extend on the other side.
+                    if seg_len < target_len:
+                        extra = target_len - seg_len
+                        if seg_start == 0:
+                            seg_end = min(len(energies), seg_end + extra)
+                        elif seg_end == len(energies):
+                            seg_start = max(0, seg_start - extra)
+                        seg_len = seg_end - seg_start
+
             if seg_len > 60:
                 center = (seg_start + seg_end) // 2
                 seg_start = max(0, center - 30)
