@@ -32,6 +32,16 @@ import time
 import argparse
 from pathlib import Path
 
+from src.synthesis.audio_normalization import normalize_audio_result
+from src.synthesis.clip_context import build_clip_context, render_prompt_context
+from src.synthesis.scoring import normalize_clip_analysis
+from src.synthesis.stage1_discovery import (
+    build_discovery_batch_context,
+    map_analysis_to_discovery,
+)
+from src.synthesis.stitching import stitch_discoveries
+from src.synthesis.title_dedup import finalize_stage3_candidates
+
 # ── Configuration (tweak per VOD / model) ────────────────────────────
 
 QWEN_API_URL = "http://100.97.240.34:8000/v1/chat/completions"
@@ -284,18 +294,16 @@ def run_audio_phase(clips, all_results, fusion, manifest):
     chat_messages = fusion.get("chat", {}).get("messages", [])
     
     def context_for_time(seconds, window=120):
-        lo, hi = seconds - window, seconds + window
-        txt = " ".join(s.get("text", "") for s in transcript_segments
-                       if lo <= s.get("start", 0) <= hi)
-        chats = [m for m in chat_messages if lo <= m.get("timestamp", 0) <= hi]
-        # Check for donation alerts: viewer msg appearing in transcript
-        donation_count = 0
-        for m in chats:
-            user = m.get("user", "")
-            msg = m.get("message", "")
-            if msg and msg in txt:
-                donation_count += 1
-        return txt[:2000], len(chats), donation_count
+        context = build_clip_context(
+            seconds=seconds,
+            transcript_segments=transcript_segments,
+            chat_messages=chat_messages,
+            window=window,
+        )
+        txt, _chat_text = render_prompt_context(context, transcript_char_limit=2000)
+        chat_count = len(context.get("chat_messages", []))
+        donation_count = len(context.get("chat_read_flags", []))
+        return txt, chat_count, donation_count
     
     for r, _ in top_n:
         transcript_excerpt, chat_count, donation_count = context_for_time(r["start"])
@@ -355,9 +363,11 @@ def run_audio_phase(clips, all_results, fusion, manifest):
     for r in all_results:
         start = r["start"]
         if start in audio_results:
-            r["analysis"]["audio_analysis"] = audio_results[start]["analysis"]
-            r["analysis"]["audio_extraction_time"] = audio_results[start].get("extraction_time_seconds")
-            r["analysis"]["audio_inference_time"] = audio_results[start].get("inference_time_seconds")
+            raw_audio = audio_results[start]
+            r["analysis"]["audio_analysis"] = raw_audio.get("analysis")
+            r["analysis"]["audio_extraction_time"] = raw_audio.get("extraction_time_seconds")
+            r["analysis"]["audio_inference_time"] = raw_audio.get("inference_time_seconds")
+            r["analysis"]["audio_structured"] = normalize_audio_result(raw_audio)
     
     # Step 8: Restart Qwen container
     log("\n  Restarting Qwen 35B vLLM container...")
@@ -480,39 +490,11 @@ Analyse these specific frames and return valid JSON only:
   "emotional_energy": 1-10,
   "visual_interest": 1-10,
   "clip_worthiness": 1-10,
-  "clip_point": "CLICK-WORTHY TITLE (1 sentence max). Use one of these proven patterns:
-
-PATTERN 1 — '[Streamer] [reaction] after [trigger]':
-✓ 'Streamer loses it after discovering her donation sound is broken'
-✓ 'Chat absolutely roasts her for this simple mistake'
-
-PATTERN 2 — 'Girl [verb] [something] and [surprise]':
-✓ 'Girl gets real about why running on empty hits different'
-✓ 'Girl thought she muted her mic... she did not'
-
-PATTERN 3 — 'The moment [streamer] realized [reveal]':
-✓ 'The moment she realized chat knew more than she did'
-✓ 'The split second her energy completely flipped'
-
-PATTERN 4 — Question bait:
-✓ 'What happens when you ask chat to explain an inside joke?'
-✓ 'Can she keep a straight face? (spoiler: no)'
-
-PATTERN 5 — Short + punchy (emote-bait):
-✓ 'She had ONE job'
-✓ 'This chat needs to be stopped'
-✓ 'Energy check gone wrong'
-
-DON'Ts — Dry descriptions (score these low):
-✗ 'Streamer reacts to donation alert'
-✗ 'Streamer talks about her day'
-✗ 'Streamer explains why she's tired'
-
-GOOD titles are specific, emotional, and make you want to click. BAD titles are generic and could describe any stream.
-NO DUPLICATE TITLES: Check the batch_context for already-used titles (title_given=...). Your clip_point MUST be different from any title_given in previous clips. If the content overlaps with a previous clip, find a unique angle.",
   "narrative_type": "storytelling|chat_banter|transactional_reaction|organic_reaction|ambient|other",
   "has_narrative_payoff": true/false,
   "requires_context": true/false,
+  "trigger": "What event starts this moment",
+  "payoff": "What resolution/punchline/payoff occurs",
   "suggested_trim_start": "CRITICAL: Narrow to EXACT second the interesting moment starts. Return clip_start ONLY if the moment truly starts at the very beginning.",
   "suggested_trim_end": "CRITICAL: Narrow to EXACT second the payoff ends. Returning the full input window should be extremely rare and only when every second is essential.",
   "trim_duration_seconds": "INTEGER = suggested_trim_end - suggested_trim_start",
@@ -521,9 +503,6 @@ NO DUPLICATE TITLES: Check the batch_context for already-used titles (title_give
   "trim_end_reason": "WHY this exact second is where the moment ends — reference what finishes (e.g. 'laughing ends by 915s' or 'punchline lands at 905s')",
   "narrative_arc": "Chronological summary of what happens in this clip window: what triggers each moment (donation alert? chat message? story?), what the streamer does, and what the actual interesting moment is.",
   "comparative_note": "How this compares to previously analysed clips in this VOD",
-  "platform_scores": {{"tiktok": 1-10, "shorts": 1-10, "twitter": 1-10, "twitch": 1-10, "reels": 1-10}},
-  "platform_reasoning": {{"tiktok": "why this score", "shorts": "why", "twitter": "why", "twitch": "why", "reels": "why"}},
-  "platform_recommendations": ["tiktok", "twitter"],  /* EXPLICIT LIST of platforms worth posting to. Empty [] if none. Only include platforms where score >= 6 AND the clip genuinely fits. */
   "reason": "why this would (or wouldn't) make a good clip"
 }}}}
 
@@ -541,15 +520,14 @@ KEY RULES:
 - TRIM MUST EXCLUDE DEAD AIR: If dead air gaps exist INSIDE your suggested_trim_start→suggested_trim_end range, your trim is wrong. Either (a) narrow the trim to cut around the gaps so no dead air remains in the clip, or (b) if the interesting content spans both sides of a dead air gap with no clean narrow, discard the clip (score ≤ 3). A clean clip has continuous speech/vocalization from trim_start to trim_end.
 - SILENCE ≠ AMBIENT: Ambient (low-fi music, rain sounds) is a deliberate atmosphere choice. Dead air is silence with nothing happening — the streamer stopped talking, there's no music, no content. Differentiate these.
 - DURATION POLICY (research-guided):
-  - Optimal trim range: 25-60s (best retention + payoff for clipped moments)
-  - Acceptable: 20-24s or 61-75s
-  - Risky: 15-19s or 76-90s
-  - Poor fit: <15s or >90s
+  - No minimum trim length requirement.
+  - Prefer the shortest trim that preserves clear setup + payoff and standalone clarity.
+  - Keep clips tight to avoid filler; very long trims are usually weaker for retention.
 - DURATION PENALTY: Compute trim_duration_seconds = suggested_trim_end - suggested_trim_start and apply penalty to clip_worthiness:
-  - Optimal 25-60s: penalty 0
-  - Acceptable 20-24s or 61-75s: penalty -1
-  - Risky 15-19s or 76-90s: penalty -2
-  - Poor fit <15s or >90s: penalty -3
+  - <=60s: penalty 0
+  - 61-75s: penalty -1
+  - 76-90s: penalty -2
+  - >90s: penalty -3
 - Final clip_worthiness MUST reflect this penalty. Set duration_penalty_applied explicitly.
 
 SCORING RUBRIC (be strict and narrative-first):
@@ -563,18 +541,16 @@ HARD CAPS:
 - If narrative_type == transactional_reaction and there is NO explanation/inside-joke arc for new viewers, clip_worthiness MUST be ≤ 4.
 - If has_narrative_payoff == false, clip_worthiness MUST be ≤ 5.
 - If requires_context == true and the moment is not understandable as a standalone clip, clip_worthiness MUST be ≤ 5.
-- If clip_point/title is generic (could apply to any stream), clip_worthiness MUST be ≤ 5.
 
 HIGH-SCORE GATE:
 - To assign clip_worthiness >= 7, the moment MUST have all of:
   (1) clear trigger,
   (2) clear payoff,
-  (3) specific title angle,
-  (4) non-transactional narrative value.
+  (3) non-transactional narrative value.
 
-Use the PLATFORM SCORING GUIDE below to evaluate platform-specific clip value.
+IMPORTANT: Stage 1 is discovery-only. Do not perform final title optimization or final platform recommendation decisions here.
 
-{platform_guide}
+Focus on narrative discovery quality and trim precision in this stage.
 
 Previous batch context: {batch_context}"""
 
@@ -639,13 +615,13 @@ IMPORTANT RULES:
 - TITLE RULE: Each clip's clip_point MUST be a click-worthy title following one of the proven patterns (reaction pattern, question bait, punchy one-liner, etc.). The title should make someone WANT to click, not just describe what happens.
 - PLATFORM RULE: For each clip, provide platform_recommendations — an explicit list of which platforms to actually post to. Only include platforms where the clip genuinely fits (score >= 6). Can recommend multiple platforms. Empty list if none.
 - TRIM RULE: Narrow suggested_trim_start/end as much as you can, but provide trim_start_reason and trim_end_reason explaining WHY those seconds are the boundaries (reference transcript timestamps).
-- DURATION POLICY (research-guided): optimal trim is 25-60s. Acceptable: 20-24s or 61-75s. Risky: 15-19s or 76-90s. Poor fit: <15s or >90s.
+- DURATION POLICY (research-guided): no minimum trim length requirement. Prefer the shortest trim that preserves setup + payoff and standalone clarity.
 - DURATION PENALTY: apply to the clip score and report duration_penalty_applied + trim_duration_seconds:
-  - Optimal 25-60s: 0
-  - Acceptable 20-24s or 61-75s: -1
-  - Risky 15-19s or 76-90s: -2
-  - Poor fit <15s or >90s: -3
-- STRONG PREFERENCE: Do NOT return the full candidate window when it's 120s unless absolutely necessary. Default to 20-60s trims; allow 60-90s only when there is clear multi-beat narrative continuity and no filler.
+  - <=60s: 0
+  - 61-75s: -1
+  - 76-90s: -2
+  - >90s: -3
+- STRONG PREFERENCE: Do NOT return the full candidate window when it's 120s unless absolutely necessary. Default to the shortest trim that keeps the full narrative payoff; allow 60-90s only when there is clear multi-beat narrative continuity and no filler.
 - RMS FALLBACK POLICY: Audio RMS fallback is a last resort for unresolved full-window 120s outputs. Your trim should stand on its own whenever possible.
 - SELECTION GATE (strict): Prefer including clips with score >= 7. 5-6 is borderline and should usually be excluded unless it has clear narrative payoff and strong platform fit. <=4 should be excluded.
 - TRANSACTIONAL GATE: A transactional_reaction clip should be excluded by default unless it includes a genuine explanation/story arc (e.g., inside joke explained to new viewers).
@@ -679,11 +655,10 @@ Analyse these extra frames and update your assessment. Return valid JSON only:
 }}}}
 
 DURATION POLICY reminder for revised scoring:
-- Optimal trim range is 25-60s.
-- Acceptable: 20-24s or 61-75s.
-- Risky: 15-19s or 76-90s.
-- Poor fit: <15s or >90s.
-- If revised trim is outside optimal, revised_clip_worthiness should reflect that penalty.
+- No minimum trim length requirement.
+- Prefer the shortest trim that preserves setup + payoff and standalone clarity.
+- Duration penalty by final trim length: <=60s (0), 61-75s (-1), 76-90s (-2), >90s (-3).
+- If revised trim is long enough to trigger a penalty, revised_clip_worthiness should reflect it.
 
 Previous analysis: {original_analysis}"""
 
@@ -733,13 +708,13 @@ IMPORTANT RULES:
 - DEDUP RULE: Each clip has a unique clip_id (e.g. 'Clip at 998s'). NEVER assign the same clip_point/title to two different clips. Each clip MUST have a unique title. Differentiate similar clips by focusing on what makes each moment distinct.
 - DEAD AIR RULE: Check for ⚠️ DEAD AIR DETECTED in the analysis log. If a single silence gap > 10 seconds exists, that clip must have a -5 penalty applied (max final score 5/10). If total silence > 30% of window, score ≤ 5. Discard clips with unacceptable dead air. Ambient atmosphere is NOT dead air — differentiate.
 - For each selected clip, provide suggested_trim_start and suggested_trim_end to capture only the relevant moment.
-- DURATION POLICY (research-guided): optimal trim is 25-60s. Acceptable: 20-24s or 61-75s. Risky: 15-19s or 76-90s. Poor fit: <15s or >90s.
+- DURATION POLICY (research-guided): no minimum trim length requirement. Prefer the shortest trim that preserves setup + payoff and standalone clarity.
 - DURATION PENALTY: apply to final score and report duration_penalty_applied + trim_duration_seconds:
-  - Optimal 25-60s: 0
-  - Acceptable 20-24s or 61-75s: -1
-  - Risky 15-19s or 76-90s: -2
-  - Poor fit <15s or >90s: -3
-- STRONG PREFERENCE: Avoid full-window outputs, especially 120s full windows. Default to 20-60s trims. Use 60-90s only when a complete multi-beat narrative requires it and there is no filler.
+  - <=60s: 0
+  - 61-75s: -1
+  - 76-90s: -2
+  - >90s: -3
+- STRONG PREFERENCE: Avoid full-window outputs, especially 120s full windows. Default to the shortest trim that keeps the full narrative payoff. Use 60-90s only when a complete multi-beat narrative requires it and there is no filler.
 - FINAL SELECTION GATE (strict): Include primarily clips with score >= 7 and clear setup→payoff narrative value.
 - BORDERLINE RULE: Score 5-6 clips should usually be excluded unless they are uniquely strong for a specific platform and still have a clear payoff.
 - TRANSACTIONAL RULE: transactional_reaction clips are excluded by default unless they contain a clear explanation/inside-joke arc that creates standalone narrative value.
@@ -759,43 +734,44 @@ RESEARCH-BACKED LENGTH + RETENTION PRINCIPLES:
 - Universal: strongest hooks happen in the first 2-3 seconds.
 - Universal: completion/retention usually beats raw duration; do not add dead time.
 - Universal trim policy for this pipeline:
-  - 15-30s: quick punchline/reaction bits
-  - 30-60s: default sweet spot for story + payoff
-  - 60-90s: only when a multi-beat narrative clearly needs it
-  - >90s: rare, usually Twitch-only unless exceptional
+  - No minimum trim length requirement.
+  - Keep only the seconds needed for setup + payoff.
+  - <=60s is generally strongest for clipped moments.
+  - 60-90s only when a multi-beat narrative clearly needs it.
+  - >90s is rare and usually weak for retention unless exceptional.
 
 TIKTOK (score 1-10):
 - Hook in first 2s is mandatory.
 - Strong pattern from large-post analysis: videos >60s can outperform shorter ones on reach/watch time IF pacing stays strong.
 - Because this pipeline outputs clipped moments (not full essays), prioritize:
-  - 25-45s for punchy bits
-  - 45-75s for clear story arc
+  - concise punchy bits (often <=45s)
+  - up to ~75s when a clear story arc needs the extra beat
   - Avoid >90s unless unusually compelling.
 - Loopability, captionability, and fast payoff still matter more than absolute length.
 
 YOUTUBE SHORTS (score 1-10):
 - Shorts creation supports up to 3 minutes, but clip discovery still rewards concise, rewatchable moments.
-- Prioritize 20-50s for most moments.
+- Prioritize concise, self-contained cuts (often <=50s).
 - Use 50-90s only when there is clear narrative progression with no filler.
 - Score down clips that require niche context or have slow ramps.
 
 TWITTER / X (score 1-10):
 - Context independence + quote-tweet bait matter most.
-- Preferred range: 20-60s (punchy and shareable).
+- Keep trims punchy and shareable (often <=60s).
 - 60-90s acceptable if payoff stays strong.
 - Penalize meandering clips even if emotional.
 
 TWITCH CLIPS (score 1-10):
-- Platform-native clips are short highlights (typically 5-60s).
+- Platform-native clips are short highlights (typically <=60s).
 - Favor personality, chat interplay, and emote-spam potential.
-- Best range here: 20-60s; only exceed 60 when story continuity clearly requires it.
+- Keep clips concise by default; exceed 60s only when story continuity clearly requires it.
 
 INSTAGRAM REELS (score 1-10):
 - Reels can be longer, but discovery tends to favor shorter cuts.
 - Strong practical target: <=90s, with best general distribution often under 90.
 - Preferred range in this pipeline:
-  - 20-45s for punchy shareability
-  - 45-75s for narrative bits
+  - concise punchy shareability (often <=45s)
+  - up to ~75s for narrative bits
   - 75-90s only if every beat contributes.
 - Prioritize visual clarity, subtitle readability, and first-3-second hook.
 """
@@ -854,52 +830,13 @@ def run():
 
     def context_for_time(seconds, window=120):
         """Get transcript + full chat messages around a timestamp."""
-        lo, hi = seconds - window, seconds + window
-        segs = [s for s in transcript_segments
-                if lo <= s.get("start", 0) <= hi]
-        txt_lines = []
-        for s in segs:
-            st = s.get("start", 0)
-            et = s.get("end", 0)
-            text = s.get("text", "")
-            txt_lines.append(f"[{st:.0f}s-{et:.0f}s] {text}")
-        txt = "\n".join(txt_lines)[:2000]
-        # Compute dead air: gaps between transcript segments
-        sorted_segs = sorted(segs, key=lambda s: s.get("start", 0))
-        dead_air_gaps = []
-        for i in range(1, len(sorted_segs)):
-            gap = sorted_segs[i]["start"] - sorted_segs[i-1]["end"]
-            if gap > 5:
-                dead_air_gaps.append((sorted_segs[i-1]["end"], sorted_segs[i]["start"], gap))
-        total_dead = sum(g for _, _, g in dead_air_gaps)
-        window_duration = hi - lo
-        if total_dead > 0:
-            pct = total_dead / window_duration * 100
-            details = "; ".join(f"{g:.0f}s gap at {s:.0f}s-{e:.0f}s" for s, e, g in dead_air_gaps)
-            txt += f"\n\n⚠️ DEAD AIR DETECTED: {total_dead:.0f}s silence ({pct:.0f}% of {window_duration}s window). Gaps: {details}"
-        # Check for chat messages that the streamer reads aloud
-        full_txt = " ".join(s.get("text", "") for s in segs).lower()
-        chat_reading_flags = []
-        chats = [m for m in chat_messages if lo <= m.get("timestamp", 0) <= hi]
-        for m in chats:
-            user = m.get("user", "?")
-            msg = m.get("message", "")
-            ts = m.get("timestamp", 0)
-            if msg and len(msg) > 20 and msg.lower()[:40] in full_txt:
-                chat_reading_flags.append((ts, user, msg))
-        if chat_reading_flags:
-            txt += "\n\n⚠️ CHAT-READ FLAGS (streamer reading chat aloud — do NOT attribute to streamer):"
-            for ts, user, msg in chat_reading_flags:
-                txt += f"\n  @{user} at {ts:.0f}s: '{msg[:80]}...' — streamer reads this aloud."
-            txt += "\nIMPORTANT: When a chat message appears in the transcript, it is the CHATTER's story, not the streamer's. Titles MUST say 'reads a chat message about...'."
-        chat_lines = []
-        for m in chats:
-            user = m.get("user", "?")
-            msg = m.get("message", "")
-            ts = m.get("timestamp", 0)
-            chat_lines.append(f"[{ts:.0f}s] @{user}: {msg}")
-        chat_text = "\n".join(chat_lines)
-        return txt, chat_text
+        context = build_clip_context(
+            seconds=seconds,
+            transcript_segments=transcript_segments,
+            chat_messages=chat_messages,
+            window=window,
+        )
+        return render_prompt_context(context, transcript_char_limit=2000)
 
     # ── Batch processing with context carryover ──
     all_results = []
@@ -960,45 +897,29 @@ def run():
         log(f"  Response in {elapsed:.1f}s")
 
         for clip in batch:
-            clip_result = {
-                "start": clip["start"],
-                "end":   clip["end"],
-                "title": clip.get("title", ""),
-                "analysis": analysis if len(batch) == 1 else {},  # one result per batch for now
-                "batch": batch_idx + 1,
-            }
+            analysis_for_clip = analysis if len(batch) == 1 else {}
 
             # When multiple clips per batch, Qwen might return an array
             # Fallback: treat the single JSON as covering the last clip
             if len(batch) > 1 and "clip_start" in analysis:
-                clip_result["analysis"] = analysis
+                analysis_for_clip = analysis
 
+            discovery = map_analysis_to_discovery(clip, analysis_for_clip)
+            clip_result = {
+                "start": clip["start"],
+                "end": clip["end"],
+                "title": clip.get("title", ""),
+                "analysis": analysis_for_clip,
+                "discovery": discovery,
+                "batch": batch_idx + 1,
+            }
             all_results.append(clip_result)
 
-        # Build running batch_context for next batch
-        high_watermark = [r for r in all_results
-                          if r.get("analysis", {}).get("clip_worthiness", 0) >= 7]
-        batch_context = (
-            f"Analysed {len(all_results)}/{total} clips so far (through batch {batch_idx+1}).\n"
-            f"Top clips identified so far:\n"
-        )
-        for r in sorted(all_results, key=lambda x: x.get("analysis", {}).get("clip_worthiness", 0), reverse=True)[:5]:
-            a = r.get("analysis", {})
-            cp_prev = a.get("clip_point", "")[:60]
-            batch_context += (
-                f"  - {r['start']}s \"{r.get('title','')[:50]}\": "
-                f"clip_worthiness={a.get('clip_worthiness','?')}/10, "
-                f"expression={a.get('primary_expression','?')}, "
-                f"energy={a.get('emotional_energy','?')}/10, "
-                f"narrative={a.get('narrative_type','?')}, "
-                f"trim={a.get('suggested_trim_start','?')}-{a.get('suggested_trim_end','?')}s, reason={a.get('trim_start_reason','')[:30]}->{a.get('trim_end_reason','')[:30]}, "
-                f"arc={a.get('narrative_arc','')[:60]}, "
-                f"platform_scores={a.get('platform_scores','?')}, "
-                f"title_given=\"{cp_prev}\"\n"
-            )
-        batch_context += (
-            f"\nCross-batch observations so far: "
-            f"{len(high_watermark)} clips scored 7+."
+        # Build discovery-only running context for next batch
+        batch_context = build_discovery_batch_context(
+            all_results,
+            total=total,
+            batch_idx=batch_idx + 1,
         )
 
         # Rate limit between batches
@@ -1006,6 +927,20 @@ def run():
             log("  Cooling down 2s before next batch ...")
             time.sleep(2)
 
+
+    # ── Stage 1.5: Deterministic cross-window stitching ──
+    discoveries = [r.get("discovery") for r in all_results if isinstance(r.get("discovery"), dict)]
+    stitched_candidates = stitch_discoveries(discoveries, max_gap_seconds=20)
+    log(
+        f"Stage 1.5 stitching: {len(discoveries)} discovery candidate(s) -> "
+        f"{len(stitched_candidates)} stitched arc(s)"
+    )
+
+    # Stage 2 scoring depends on audio_structured context, so it runs after
+    # the audio phase injection below.
+    scored_candidates = []
+    eligible_source_ids = set()
+    analysis_by_stitched_id = {}
 
     # ── Phase 1.5: Audio Analysis (model swap → Omni → audio → restart Qwen) ──
     all_results = run_audio_phase(clips, all_results, fusion, manifest)
@@ -1023,6 +958,78 @@ def run():
         log(f"Audio context built for {len(audio_clips_found)} clips: {audio_clips_found}")
     else:
         audio_context = "No audio analysis available for this VOD."
+
+    # ── Stage 2: Deterministic scoring + hard gate (audio-aware) ──
+    results_by_candidate_id = {}
+    for r in all_results:
+        d = r.get("discovery") or {}
+        cid = d.get("candidate_id")
+        if cid:
+            results_by_candidate_id[cid] = r
+
+    scored_candidates = []
+    eligible_source_ids = set()
+    analysis_by_stitched_id = {}
+    rejected_clips = []
+
+    for stitched in stitched_candidates:
+        source_ids = stitched.get("source_candidate_ids") or []
+        source_results = [results_by_candidate_id.get(cid) for cid in source_ids]
+        source_results = [r for r in source_results if r is not None]
+        if not source_results:
+            continue
+
+        representative = max(
+            source_results,
+            key=lambda r: _as_float(r.get("analysis", {}).get("clip_worthiness"), 0.0),
+        )
+        rep_analysis = dict(representative.get("analysis", {}))
+
+        context_window = max(15, _as_int(stitched.get("end"), 0) - _as_int(stitched.get("start"), 0))
+        stitched_context = build_clip_context(
+            seconds=_as_int(stitched.get("start"), 0),
+            transcript_segments=transcript_segments,
+            chat_messages=chat_messages,
+            window=context_window,
+        )
+
+        scored = normalize_clip_analysis(
+            candidate=stitched,
+            analysis=rep_analysis,
+            context=stitched_context,
+            audio=rep_analysis.get("audio_structured"),
+        )
+        scored_candidates.append(scored)
+
+        stitched_id = str(stitched.get("stitched_id"))
+        if rep_analysis.get("suggested_trim_start") is None:
+            rep_analysis["suggested_trim_start"] = stitched.get("start")
+        if rep_analysis.get("suggested_trim_end") is None:
+            rep_analysis["suggested_trim_end"] = stitched.get("end")
+        analysis_by_stitched_id[stitched_id] = rep_analysis
+
+        if scored.get("eligible_for_final") and _as_float(scored.get("final_score"), 0.0) >= 8.0:
+            for cid in source_ids:
+                eligible_source_ids.add(cid)
+        else:
+            reason_codes = list(scored.get("rejection_reasons") or [])
+            if not reason_codes:
+                reason_codes = ["below_score_threshold"]
+            rejected_clips.append({
+                "stage": "stage2",
+                "clip_id": stitched_id,
+                "start": stitched.get("start"),
+                "end": stitched.get("end"),
+                "final_score": scored.get("final_score"),
+                "eligible_for_final": scored.get("eligible_for_final"),
+                "trim_source": scored.get("trim_source"),
+                "reason_codes": reason_codes,
+            })
+
+    log(
+        f"Stage 2 scoring (audio-aware): {len(scored_candidates)} stitched candidate(s), "
+        f"{len(eligible_source_ids)} source clip(s) passed score>=8 hard gate"
+    )
 
 
     # ── Phase 2a: Provisional synthesis (text-only, no hard cap, frame requests) ──
@@ -1171,35 +1178,67 @@ def run():
     log(f"\n{'='*60}")
     log("PHASE 2c: FINAL SYNTHESIS ...")
 
-    # Rebuild complete log with revised analyses
+    # Rebuild complete log with revised analyses, but only for clips that
+    # passed deterministic Stage 2 hard gate (final_score >= 8).
+    gated_results = [
+        r for r in sorted(all_results, key=lambda x: x["start"])
+        if ((r.get("discovery") or {}).get("candidate_id") in eligible_source_ids)
+    ]
+
     final_log = ""
-    for r in sorted(all_results, key=lambda x: x["start"]):
+    for r in gated_results:
         final_log += build_analysis_log_entry(r) + "\n"
 
-    final_payload = {
-        "model": QWEN_MODEL,
-        "messages": [{
-            "role": "user",
-            "content": FINAL_SYNTHESIS_PROMPT.format(
-                vod_title=manifest.get("vod_title", "Unknown"),
-                streamer=manifest.get("streamer", "Unknown"),
-                complete_log=final_log,
-                total_clips=len(all_results),
-                vod_id=VOD_ID,
-                frames_requested_count=frames_served,
-                audio_context=audio_context,
-                platform_guide=PLATFORM_SCORING_GUIDE,
-            )
-        }],
-        "max_tokens": 16384,
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-    }
+    if not gated_results:
+        log("No clips passed Stage 2 hard gate (score >= 8). Skipping final synthesis call.")
+        final_synthesis = {
+            "final_selected_clips": [],
+            "gating_summary": {
+                "stage2_scored_candidates": len(scored_candidates),
+                "eligible_source_clips": 0,
+                "hard_gate": "final_score>=8",
+            },
+        }
+    else:
+        final_payload = {
+            "model": QWEN_MODEL,
+            "messages": [{
+                "role": "user",
+                "content": FINAL_SYNTHESIS_PROMPT.format(
+                    vod_title=manifest.get("vod_title", "Unknown"),
+                    streamer=manifest.get("streamer", "Unknown"),
+                    complete_log=final_log,
+                    total_clips=len(gated_results),
+                    vod_id=VOD_ID,
+                    frames_requested_count=frames_served,
+                    audio_context=audio_context,
+                    platform_guide=PLATFORM_SCORING_GUIDE,
+                )
+            }],
+            "max_tokens": 16384,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+        }
 
-    t0 = time.time()
-    final_synthesis = qwen_call(final_payload)
-    elapsed = time.time() - t0
-    log(f"Final synthesis complete in {elapsed:.1f}s")
+        t0 = time.time()
+        final_synthesis = qwen_call(final_payload)
+        elapsed = time.time() - t0
+        log(f"Final synthesis complete in {elapsed:.1f}s")
+
+    # Stage 3 deterministic verification + title/dedup pass.
+    stage3_final_selected = finalize_stage3_candidates(
+        scored_candidates=scored_candidates,
+        stitched_candidates=stitched_candidates,
+        analysis_by_candidate=analysis_by_stitched_id,
+        min_score=8.0,
+    )
+    log(f"Stage 3 title/dedup pass selected {len(stage3_final_selected)} clip(s)")
+
+    # Keep model ranking as reference, but enforce Stage 3 deterministic list as
+    # canonical final_selected_clips for downstream extraction.
+    if isinstance(final_synthesis, dict):
+        final_synthesis["model_final_selected_clips"] = final_synthesis.get("final_selected_clips", [])
+        final_synthesis["final_selected_clips"] = stage3_final_selected
 
     # ── Save ──
     output = {
@@ -1209,6 +1248,10 @@ def run():
         "clips_analyzed": len(all_results),
         "clips_with_extra_frames": frames_served,
         "clip_details": all_results,
+        "stage1_5_stitched": stitched_candidates,
+        "stage2_scored": scored_candidates,
+        "stage3_final_selected": stage3_final_selected,
+        "rejected_clips": rejected_clips,
         "provisional_ranking": provisional,
         "final_ranking": final_synthesis,
     }
@@ -1247,11 +1290,13 @@ def run():
         is_full_window = (trim_start == raw_start and trim_end == raw_end)
 
         if not is_full_window:
+            s["trim_source"] = "qwen"
             log(f"  Clip at {raw_start}s: Qwen narrowed to {width}s ({trim_start}-{trim_end}s) — trusting Qwen's reasoning")
             continue
 
         # RMS fallback policy: only run RMS when Qwen returned the full 120s candidate window.
         if candidate_width != 120:
+            s["trim_source"] = "qwen"
             log(f"  Clip at {raw_start}s: Qwen returned full {candidate_width}s window (not 120s) — keeping Qwen trim, skipping RMS")
             continue
 
@@ -1280,17 +1325,14 @@ def run():
 
             if len(energies) < 15:
                 log(f"    Too short ({len(energies)}s) — keeping Qwen's suggestion")
+                s["trim_source"] = "qwen"
                 continue
 
-            # Find the peak second (loudest moment)
             peak_idx = max(range(len(energies)), key=lambda i: energies[i])
             peak_rms = energies[peak_idx]
-
-            # Compute dynamic threshold based on music floor
             sorted_energies = sorted(energies)
-            music_floor = sorted_energies[len(energies) // 4]  # 25th percentile = music baseline
+            music_floor = sorted_energies[len(energies) // 4]
 
-            # Expand outward until energy settles near music floor
             threshold = music_floor + (peak_rms - music_floor) * 0.15
             seg_start = peak_idx
             seg_end = peak_idx + 1
@@ -1301,9 +1343,6 @@ def run():
 
             seg_len = seg_end - seg_start
 
-            # Build a broader envelope with a looser threshold so short peaks can
-            # still expand into a natural moment window (instead of collapsing to
-            # fixed-length clips).
             broad_threshold = music_floor + (peak_rms - music_floor) * 0.05
             broad_start = peak_idx
             broad_end = peak_idx + 1
@@ -1312,14 +1351,11 @@ def run():
             while broad_end < len(energies) and energies[broad_end] > broad_threshold:
                 broad_end += 1
 
-            # Enforce sensible range: 15-60s, but keep duration dynamic.
             if seg_len < 15:
-                # Prefer the broader natural envelope first.
                 if (broad_end - broad_start) > seg_len:
                     seg_start, seg_end = broad_start, broad_end
                     seg_len = seg_end - seg_start
 
-                # If still too short, pad around peak only as much as needed.
                 if seg_len < 15:
                     target_len = 15
                     need = target_len - seg_len
@@ -1329,7 +1365,6 @@ def run():
                     seg_end = min(len(energies), seg_end + right)
                     seg_len = seg_end - seg_start
 
-                    # If we hit an edge, extend on the other side.
                     if seg_len < target_len:
                         extra = target_len - seg_len
                         if seg_start == 0:
@@ -1349,14 +1384,78 @@ def run():
             log(f"    Audio RMS: dynamic trim = {narrow_start}-{narrow_end}s ({seg_len}s) around peak at {raw_start + peak_idx}s (RMS: {peak_rms:.6f})")
             s["suggested_trim_start"] = narrow_start
             s["suggested_trim_end"] = narrow_end
+            s["trim_source"] = "rms_fallback"
 
         except Exception as e:
             log(f"    Audio RMS failed: {e} — falling back to middle 45s")
             center = (raw_start + raw_end) // 2
             s["suggested_trim_start"] = max(raw_start, center - 22)
             s["suggested_trim_end"] = min(raw_end, center + 23)
+            s["trim_source"] = "rms_fallback"
 
-    # Re-save with narrowed boundaries
+    # Recompute deterministic score/eligibility after any trim changes from RMS.
+    stitched_by_id = {str(c.get("stitched_id")): c for c in stitched_candidates}
+    rescored_selected = []
+    rms_rejected_clips = []
+    for s in selected:
+        clip_id = str(s.get("clip_id"))
+        stitched = stitched_by_id.get(clip_id)
+        if not stitched:
+            continue
+
+        rep_analysis = dict(analysis_by_stitched_id.get(clip_id, {}))
+        rep_analysis["suggested_trim_start"] = s.get("suggested_trim_start", stitched.get("start"))
+        rep_analysis["suggested_trim_end"] = s.get("suggested_trim_end", stitched.get("end"))
+        rep_analysis["trim_source"] = s.get("trim_source", "qwen")
+
+        context_window = max(15, _as_int(stitched.get("end"), 0) - _as_int(stitched.get("start"), 0))
+        stitched_context = build_clip_context(
+            seconds=_as_int(stitched.get("start"), 0),
+            transcript_segments=transcript_segments,
+            chat_messages=chat_messages,
+            window=context_window,
+        )
+
+        rescored = normalize_clip_analysis(
+            candidate=stitched,
+            analysis=rep_analysis,
+            context=stitched_context,
+            audio=rep_analysis.get("audio_structured"),
+        )
+
+        s["score"] = rescored.get("final_score")
+        s["normalized_score"] = rescored.get("final_score")
+        s["raw_score"] = rescored.get("raw_score")
+        s["trim_source"] = rescored.get("trim_source", s.get("trim_source"))
+        s["rank"] = len(rescored_selected) + 1
+
+        if rescored.get("eligible_for_final") and _as_float(rescored.get("final_score"), 0.0) >= 8.0:
+            rescored_selected.append(s)
+        else:
+            reason_codes = list(rescored.get("rejection_reasons") or [])
+            if "rms_rescore_below_threshold" not in reason_codes:
+                reason_codes.append("rms_rescore_below_threshold")
+
+            rms_rejected_clips.append({
+                "stage": "post_rms_rescore",
+                "clip_id": clip_id,
+                "start": stitched.get("start"),
+                "end": stitched.get("end"),
+                "final_score": rescored.get("final_score"),
+                "eligible_for_final": rescored.get("eligible_for_final"),
+                "trim_source": rescored.get("trim_source"),
+                "reason_codes": reason_codes,
+            })
+            log(
+                f"  Dropping clip {clip_id} after RMS rescoring: "
+                f"final_score={rescored.get('final_score')} eligible={rescored.get('eligible_for_final')}"
+            )
+
+    selected = rescored_selected
+
+    # Re-save with narrowed boundaries and rescored eligibility.
+    if rms_rejected_clips:
+        output.setdefault("rejected_clips", []).extend(rms_rejected_clips)
     output["final_ranking"]["final_selected_clips"] = selected
     with open(OUTPUT_PATH, "w") as f:
         json.dump(output, f, indent=2)

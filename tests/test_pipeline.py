@@ -12,9 +12,12 @@ Usage:
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
+
+import pytest
 
 # Ensure we can import the packages
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -25,11 +28,12 @@ os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/hf"))
 
 def test_transcribe():
     """Test whisper transcription with the test speech file."""
+    pytest.importorskip("faster_whisper")
     from src.preprocessing.transcribe import transcribe
 
     audio = "output/e2e_test/test_speech.mp3"
     if not os.path.exists(audio):
-        return "SKIP - test audio not found"
+        pytest.skip("test audio not found")
 
     results = transcribe(audio, model_size="base")
     assert len(results) > 0, "No transcript segments produced"
@@ -41,24 +45,24 @@ def test_transcribe():
         assert "end" in seg
         assert "text" in seg
         assert "confidence" in seg
-    return "PASS"
 
 
 def test_scene_detect():
     """Test scene detection with the test video."""
+    pytest.importorskip("scenedetect")
     from src.preprocessing.scene import detect_scenes
 
     video = "output/e2e_test/test_speech_h264.mp4"
     if not os.path.exists(video):
-        return "SKIP - test video not found"
+        pytest.skip("test video not found")
 
     results = detect_scenes(video)
     print(f"  scenes: {len(results)} boundaries")
-    return "PASS"
 
 
 def test_chat_analysis():
     """Test chat analysis with a mock chat file."""
+    pytest.importorskip("numpy")
     from src.preprocessing.chat import analyze_chat
 
     # Create a synthetic chat for testing
@@ -68,7 +72,6 @@ def test_chat_analysis():
     assert "spikes" in result
     assert "top_emotes" in result
     print(f"  chat: {result['total_messages']} messages, {len(result['spikes'])} spikes")
-    return "PASS"
 
 
 def test_fusion():
@@ -103,15 +106,16 @@ def test_fusion():
     assert moments[0]["score"] > 0, "Score should be > 0"
     assert "chat_spike" in moments[0]["signals"] or "voice_excitement" in moments[0]["signals"]
     print(f"  fusion: {n} moments, top score={moments[0]['score']}")
-    return "PASS"
 
 
 def test_e2e():
     """End-to-end test: download VOD from YouTube and run pipeline."""
+    pytest.importorskip("faster_whisper")
+
     if not shutil.which("yt-dlp"):
-        return "SKIP - yt-dlp not found"
+        pytest.skip("yt-dlp not found")
     if not shutil.which("ffmpeg"):
-        return "SKIP - ffmpeg not found"
+        pytest.skip("ffmpeg not found")
 
     os.makedirs("output/e2e_test", exist_ok=True)
 
@@ -147,7 +151,6 @@ def test_e2e():
         "output/e2e_test/moments.json",
     )
     print(f"  fusion: {n_moments} moments")
-    return "PASS"
 
 
 if __name__ == "__main__":
