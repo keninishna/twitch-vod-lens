@@ -62,8 +62,8 @@ def build_clip_context(
     Returns schema-aligned fields for `ClipContext` plus raw window bounds.
     """
 
-    lo = _safe_float(seconds) - _safe_float(window)
-    hi = _safe_float(seconds) + _safe_float(window)
+    lo = max(0.0, _safe_float(seconds) - _safe_float(window))
+    hi = max(lo + 1.0, _safe_float(seconds) + _safe_float(window))
 
     segs = [
         s
