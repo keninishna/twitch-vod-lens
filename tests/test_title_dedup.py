@@ -254,3 +254,57 @@ def test_finalize_stage3_candidates_fallback_selects_top_n_when_no_clip_meets_ga
         "stitched_222_320_2",
         "stitched_330_440_3",
     ]
+
+
+def test_finalize_stage3_candidates_chat_title_removes_redundant_chat_message_phrase():
+    scored = [
+        {
+            "candidate_id": "stitched_638_1118_1",
+            "start": 638,
+            "end": 1118,
+            "final_score": 7.0,
+            "raw_score": 7.0,
+            "eligible_for_final": False,
+            "penalty_trace": [],
+            "hard_gates": [],
+            "rejection_reasons": ["below_score_threshold"],
+            "trim_source": "qwen",
+        }
+    ]
+
+    stitched = [
+        {
+            "stitched_id": "stitched_638_1118_1",
+            "start": 638,
+            "end": 1118,
+            "narrative_type": "chat_reveal",
+            "trigger": "chat message from 'lost mine sadly' about a streak",
+            "payoff": "streamer explains the streak context",
+            "evidence_lines": ["[700s] ..."],
+            "confidence": 0.75,
+            "source_candidate_ids": ["cand_638"],
+            "source_windows": [[638, 1118]],
+            "merge_reasons": ["single_candidate"],
+        }
+    ]
+
+    analysis_by_candidate = {
+        "stitched_638_1118_1": {
+            "clip_point": "Streamer reads a chat message about chat message from 'lost mine sadly' about a streak",
+            "suggested_trim_start": 638,
+            "suggested_trim_end": 758,
+            "platform_scores": {"twitch": 6},
+            "platform_recommendations": ["twitch"],
+        }
+    }
+
+    final = finalize_stage3_candidates(
+        scored_candidates=scored,
+        stitched_candidates=stitched,
+        analysis_by_candidate=analysis_by_candidate,
+        min_score=8.0,
+        fallback_top_n_when_empty=1,
+    )
+
+    assert len(final) == 1
+    assert final[0]["clip_point"] == "What happens when chat drops a message about a streak?"

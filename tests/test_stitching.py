@@ -100,3 +100,63 @@ def test_stitch_discoveries_can_merge_on_shared_tokens_even_if_narrative_type_di
     reasons = stitched[0]["merge_reasons"]
     assert "temporal_gap<=20" in reasons
     assert any(r.startswith("shared_tokens:") for r in reasons)
+
+
+def test_stitch_discoveries_can_bridge_across_noisy_middle_segment():
+    discoveries = [
+        {
+            "candidate_id": "cand_100",
+            "start": 100,
+            "end": 130,
+            "narrative_type": "chat_reveal",
+            "trigger": "Chat asks about the F1 owner story",
+            "payoff": "Streamer starts context setup",
+            "evidence_lines": ["[112s] wait, you met who?"],
+            "confidence": 0.74,
+        },
+        {
+            "candidate_id": "cand_140",
+            "start": 140,
+            "end": 150,
+            "narrative_type": "filler",
+            "trigger": "Quick unrelated thank-you",
+            "payoff": "Moves on",
+            "evidence_lines": ["[145s] thanks for the sub"],
+            "confidence": 0.41,
+        },
+        {
+            "candidate_id": "cand_165",
+            "start": 165,
+            "end": 195,
+            "narrative_type": "chat_reveal",
+            "trigger": "Returns to the same F1 owner thread",
+            "payoff": "Punchline lands in chat",
+            "evidence_lines": ["[178s] the same McLaren owner message again"],
+            "confidence": 0.83,
+        },
+    ]
+
+    debug_decisions = []
+    stitched = stitch_discoveries(
+        discoveries,
+        max_gap_seconds=20,
+        min_shared_tokens=2,
+        max_bridge_gap_seconds=45,
+        debug_decisions=debug_decisions,
+    )
+
+    # cand_100 and cand_165 should stitch despite a noisy middle candidate.
+    assert len(stitched) == 2
+    merged_group = next(c for c in stitched if c["source_candidate_ids"] != ["cand_140"])
+    assert merged_group["source_candidate_ids"] == ["cand_100", "cand_165"]
+    assert "temporal_bridge_gap<=45" in merged_group["merge_reasons"]
+
+    # Debug trace should capture both failed and successful pair decisions.
+    assert any(
+        d.get("left_candidate_id") == "cand_100" and d.get("right_candidate_id") == "cand_140" and not d.get("merged")
+        for d in debug_decisions
+    )
+    assert any(
+        d.get("left_candidate_id") == "cand_100" and d.get("right_candidate_id") == "cand_165" and d.get("merged")
+        for d in debug_decisions
+    )

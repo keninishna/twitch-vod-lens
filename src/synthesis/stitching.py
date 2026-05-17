@@ -1,14 +1,14 @@
 """Stage 1.5 deterministic cross-window stitching.
 
-This module merges adjacent Stage 1 discovery candidates into stitched story arcs
-while preserving provenance fields required by the stage contract.
+This module merges Stage 1 discovery candidates into stitched story arcs while
+preserving provenance fields required by the stage contract.
 """
 
 from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Dict, Iterable, List, Set
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from src.synthesis.schemas import validate_stage_payload
 
@@ -43,6 +43,10 @@ def _tokenize(text: str) -> Set[str]:
     return toks
 
 
+def _candidate_id(candidate: Dict) -> str:
+    return str(candidate.get("candidate_id") or f"cand_{_as_int(candidate.get('start'), 0)}")
+
+
 def _candidate_tokens(candidate: Dict) -> Set[str]:
     chunks: List[str] = [
         str(candidate.get("trigger") or ""),
@@ -51,30 +55,6 @@ def _candidate_tokens(candidate: Dict) -> Set[str]:
     ]
     chunks.extend(str(x) for x in (candidate.get("evidence_lines") or []))
     return _tokenize(" ".join(chunks))
-
-
-def _should_merge(left: Dict, right: Dict, max_gap_seconds: int, min_shared_tokens: int):
-    left_end = _as_int(left.get("end"), 0)
-    right_start = _as_int(right.get("start"), 0)
-    gap = right_start - left_end
-
-    if gap > max_gap_seconds:
-        return False, []
-
-    reasons: List[str] = [f"temporal_gap<={max_gap_seconds}"]
-
-    left_type = str(left.get("narrative_type") or "unknown")
-    right_type = str(right.get("narrative_type") or "unknown")
-    if left_type == right_type:
-        reasons.append(f"narrative_type_match:{left_type}")
-        return True, reasons
-
-    shared = sorted(_candidate_tokens(left).intersection(_candidate_tokens(right)))
-    if len(shared) >= min_shared_tokens:
-        reasons.append("shared_tokens:" + ",".join(shared[:6]))
-        return True, reasons
-
-    return False, []
 
 
 def _dedupe_preserve_order(items: Iterable[str]) -> List[str]:
@@ -87,7 +67,78 @@ def _dedupe_preserve_order(items: Iterable[str]) -> List[str]:
     return out
 
 
-def _aggregate_cluster(cluster: List[Dict], stitched_idx: int) -> Dict:
+def _score_pair_merge(
+    left: Dict,
+    right: Dict,
+    max_gap_seconds: int,
+    min_shared_tokens: int,
+    max_bridge_gap_seconds: int,
+) -> Tuple[bool, List[str], Dict]:
+    """Score whether two candidates should belong to the same stitched component.
+
+    Returns:
+      - should_merge
+      - human-readable reason codes
+      - debug record payload
+    """
+
+    left_end = _as_int(left.get("end"), 0)
+    right_start = _as_int(right.get("start"), 0)
+    gap = right_start - left_end
+
+    left_type = str(left.get("narrative_type") or "unknown")
+    right_type = str(right.get("narrative_type") or "unknown")
+    type_match = left_type == right_type
+
+    shared_tokens = sorted(_candidate_tokens(left).intersection(_candidate_tokens(right)))
+    shared_count = len(shared_tokens)
+
+    score = 0
+    reasons: List[str] = []
+
+    if gap <= max_gap_seconds:
+        score += 2
+        reasons.append(f"temporal_gap<={max_gap_seconds}")
+    elif gap <= max_bridge_gap_seconds:
+        score += 1
+        reasons.append(f"temporal_bridge_gap<={max_bridge_gap_seconds}")
+
+    if type_match:
+        score += 2
+        reasons.append(f"narrative_type_match:{left_type}")
+
+    if shared_count >= min_shared_tokens:
+        score += 2
+        reasons.append("shared_tokens:" + ",".join(shared_tokens[:6]))
+    elif shared_count > 0:
+        score += 1
+        reasons.append("weak_shared_tokens:" + ",".join(shared_tokens[:4]))
+
+    # Backward-compatible strict local merge rule + broader graph rule.
+    strict_local_rule = gap <= max_gap_seconds and (type_match or shared_count >= min_shared_tokens)
+    graph_rule = gap <= max_bridge_gap_seconds and score >= 4
+    should_merge = strict_local_rule or graph_rule
+
+    debug_record = {
+        "left_candidate_id": _candidate_id(left),
+        "right_candidate_id": _candidate_id(right),
+        "left_window": [_as_int(left.get("start"), 0), _as_int(left.get("end"), 0)],
+        "right_window": [_as_int(right.get("start"), 0), _as_int(right.get("end"), 0)],
+        "gap_seconds": gap,
+        "type_match": type_match,
+        "shared_token_count": shared_count,
+        "shared_tokens": shared_tokens[:8],
+        "score": score,
+        "strict_local_rule": strict_local_rule,
+        "graph_rule": graph_rule,
+        "merged": should_merge,
+        "reasons": reasons,
+    }
+
+    return should_merge, reasons, debug_record
+
+
+def _aggregate_cluster(cluster: List[Dict], stitched_idx: int, merge_reasons: Optional[List[str]] = None) -> Dict:
     starts = [_as_int(c.get("start"), 0) for c in cluster]
     ends = [_as_int(c.get("end"), 0) for c in cluster]
 
@@ -110,6 +161,10 @@ def _aggregate_cluster(cluster: List[Dict], stitched_idx: int) -> Dict:
     if not evidence:
         evidence = ["No direct evidence provided by model output"]
 
+    reason_list = _dedupe_preserve_order(merge_reasons or [])
+    if not reason_list:
+        reason_list = ["single_candidate"]
+
     stitched = {
         "stitched_id": f"stitched_{min(starts)}_{max(ends)}_{stitched_idx}",
         "start": min(starts),
@@ -119,14 +174,9 @@ def _aggregate_cluster(cluster: List[Dict], stitched_idx: int) -> Dict:
         "payoff": payoff,
         "evidence_lines": evidence,
         "confidence": round(max(_as_float(c.get("confidence"), 0.0) for c in cluster), 4),
-        "source_candidate_ids": [str(c.get("candidate_id") or f"cand_{_as_int(c.get('start'), 0)}") for c in cluster],
+        "source_candidate_ids": [_candidate_id(c) for c in cluster],
         "source_windows": [[_as_int(c.get("start"), 0), _as_int(c.get("end"), 0)] for c in cluster],
-        "merge_reasons": _dedupe_preserve_order(
-            reason
-            for c in cluster
-            for reason in (c.get("_merge_reasons") or [])
-            if reason
-        ) or ["single_candidate"],
+        "merge_reasons": reason_list,
     }
 
     validated = validate_stage_payload("stitched", stitched)
@@ -137,46 +187,129 @@ def stitch_discoveries(
     discoveries: List[Dict],
     max_gap_seconds: int = 20,
     min_shared_tokens: int = 2,
+    max_bridge_gap_seconds: int = 45,
+    max_cluster_span_seconds: int = 240,
+    debug_decisions: Optional[List[Dict]] = None,
 ) -> List[Dict]:
-    """Deterministically merge adjacent Stage 1 discoveries.
+    """Deterministically stitch discoveries with pairwise graph merging.
 
-    Two candidates merge when:
-    - temporal gap <= max_gap_seconds, and
-    - either narrative_type matches OR they share enough narrative tokens.
+    Compared to adjacency-only merging, this allows story arcs to stitch across
+    noisy/misaligned intermediate candidates when evidence supports continuity.
+
+    Edge rule:
+    - pair gap <= max_bridge_gap_seconds, and
+    - weighted evidence score >= threshold (or strict local adjacency rule).
+
+    Component guard:
+    - merged component span cannot exceed max_cluster_span_seconds.
     """
 
     ordered = sorted(discoveries, key=lambda d: (_as_int(d.get("start"), 0), _as_int(d.get("end"), 0)))
     if not ordered:
         return []
 
-    stitched_clusters: List[List[Dict]] = []
-    current_cluster: List[Dict] = [dict(ordered[0], _merge_reasons=["single_candidate"])]
+    n = len(ordered)
 
-    for nxt in ordered[1:]:
-        prev = current_cluster[-1]
-        should_merge, reasons = _should_merge(
-            left=prev,
-            right=nxt,
-            max_gap_seconds=max_gap_seconds,
-            min_shared_tokens=min_shared_tokens,
-        )
+    # Build candidate merge edges.
+    edge_candidates: List[Tuple[int, int, List[str], int, int]] = []
+    for i in range(n):
+        left = ordered[i]
+        left_end = _as_int(left.get("end"), 0)
+        for j in range(i + 1, n):
+            right = ordered[j]
+            gap = _as_int(right.get("start"), 0) - left_end
+            if gap > max_bridge_gap_seconds:
+                break
 
-        nxt_copy = dict(nxt)
-        if should_merge:
-            # Replace default singleton marker with real merge reasons.
-            if current_cluster[-1].get("_merge_reasons") == ["single_candidate"]:
-                current_cluster[-1]["_merge_reasons"] = []
-            nxt_copy["_merge_reasons"] = reasons
-            current_cluster.append(nxt_copy)
-        else:
-            stitched_clusters.append(current_cluster)
-            nxt_copy["_merge_reasons"] = ["single_candidate"]
-            current_cluster = [nxt_copy]
+            should_merge, reasons, debug_record = _score_pair_merge(
+                left=left,
+                right=right,
+                max_gap_seconds=max_gap_seconds,
+                min_shared_tokens=min_shared_tokens,
+                max_bridge_gap_seconds=max_bridge_gap_seconds,
+            )
 
-    stitched_clusters.append(current_cluster)
+            if debug_decisions is not None:
+                debug_decisions.append(debug_record)
+
+            if should_merge:
+                edge_candidates.append((i, j, reasons, debug_record["score"], gap))
+
+    # DSU helpers.
+    parent = list(range(n))
+    rank = [0] * n
+    root_min_start = [_as_int(c.get("start"), 0) for c in ordered]
+    root_max_end = [_as_int(c.get("end"), 0) for c in ordered]
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    accepted_edges: List[Tuple[int, int, List[str]]] = []
+
+    # Prefer stronger edges first, then tighter temporal gaps.
+    edge_candidates.sort(key=lambda e: (-e[3], e[4], e[0], e[1]))
+
+    for i, j, reasons, score, gap in edge_candidates:
+        ri = find(i)
+        rj = find(j)
+        if ri == rj:
+            continue
+
+        merged_min = min(root_min_start[ri], root_min_start[rj])
+        merged_max = max(root_max_end[ri], root_max_end[rj])
+        merged_span = merged_max - merged_min
+
+        if merged_span > max_cluster_span_seconds:
+            if debug_decisions is not None:
+                debug_decisions.append({
+                    "left_candidate_id": _candidate_id(ordered[i]),
+                    "right_candidate_id": _candidate_id(ordered[j]),
+                    "gap_seconds": gap,
+                    "score": score,
+                    "merged": False,
+                    "reasons": ["span_guard_exceeded"],
+                    "component_span_seconds": merged_span,
+                    "max_cluster_span_seconds": max_cluster_span_seconds,
+                })
+            continue
+
+        if rank[ri] < rank[rj]:
+            ri, rj = rj, ri
+        parent[rj] = ri
+        if rank[ri] == rank[rj]:
+            rank[ri] += 1
+
+        root_min_start[ri] = merged_min
+        root_max_end[ri] = merged_max
+        accepted_edges.append((i, j, reasons))
+
+    # Collect connected components.
+    groups: Dict[int, List[int]] = {}
+    for idx in range(n):
+        root = find(idx)
+        groups.setdefault(root, []).append(idx)
 
     stitched: List[Dict] = []
-    for idx, cluster in enumerate(stitched_clusters, start=1):
-        stitched.append(_aggregate_cluster(cluster, stitched_idx=idx))
+    for stitched_idx, indices in enumerate(sorted(groups.values(), key=lambda g: min(_as_int(ordered[i].get("start"), 0) for i in g)), start=1):
+        sorted_indices = sorted(indices, key=lambda i: (_as_int(ordered[i].get("start"), 0), _as_int(ordered[i].get("end"), 0)))
+        cluster = [ordered[i] for i in sorted_indices]
+
+        if len(cluster) == 1:
+            group_reasons = ["single_candidate"]
+        else:
+            idx_set = set(sorted_indices)
+            group_reasons = _dedupe_preserve_order(
+                reason
+                for i, j, reasons in accepted_edges
+                if i in idx_set and j in idx_set
+                for reason in reasons
+            )
+            if not group_reasons:
+                group_reasons = ["graph_component_merge"]
+
+        stitched.append(_aggregate_cluster(cluster, stitched_idx=stitched_idx, merge_reasons=group_reasons))
 
     return stitched

@@ -1,7 +1,7 @@
 # VOD Lens — Clip Intelligence Pipeline (Compressed)
 
 > **Status:** Active Development
-> **Last Updated:** May 17, 2026
+> **Last Updated:** May 17, 2026 (Stage 1 direct title contract + WSL2/Qwen readiness troubleshooting)
 > **Repo:** https://github.com/keninishna/twitch-vod-lens
 
 ## Purpose
@@ -18,7 +18,7 @@ This document is a compact operator reference for the current clip-intelligence 
 
 ```text
 Preprocessing (transcript + scenes + YOLO + chat)
-  -> Stage 1: Discovery (LLM, no titles/platform scoring)
+  -> Stage 1: Discovery (LLM, no final platform decisions; emits draft title fields for carryover)
   -> Stage 1.5: Deterministic cross-window stitching
   -> Stage 1.5b: Audio normalization to structured flags
   -> Stage 2: Deterministic scoring + penalties + hard gate
@@ -27,11 +27,26 @@ Preprocessing (transcript + scenes + YOLO + chat)
   -> Clip extraction + Nextcloud upload + public share links
 ```
 
+### Current Workstream (May 17, 2026)
+
+1. **Stage 1 title quality pass (active)**
+   - Added a compact research brief to Stage 1 prompt (YouTube/NNg/curiosity-gap guidance).
+   - Stage 1 now emits direct draft title fields:
+     - `clip_point`
+     - `title_why`
+   - Removed provisional-named fields/fallback layering for this path.
+
+2. **Qwen/vLLM reliability hardening (active)**
+   - Verified current WSL2 endpoint path is `100.97.240.34:8000`.
+   - Observed real failure mode: WSL2/Tailscale offline + vLLM cold start window.
+   - During cold start, container can be `Up` while `/v1/models` still returns connection refused for ~1-2 minutes.
+   - Next stabilization step: add deterministic preflight wait-for-readiness gate before batch analysis.
+
 ### Stage Invariants (Non-Negotiable)
 
 1. **Stage 1 is discovery-only**
-   - No final title generation
    - No final platform posting decisions
+   - Draft `clip_point` / `title_why` allowed for carryover context
 2. **Stage 2 is deterministic enforcement**
    - Hard gate: `score >= 8` to proceed
 3. **Stage 3 is finalization**
@@ -67,6 +82,29 @@ Preprocessing (transcript + scenes + YOLO + chat)
   - `clip_id` anchors
   - `title_given` carryover context
   - explicit "no duplicate concept/title" rule + deterministic dedup pass
+
+#### 3.1) Stage 3 Title Contract (Phase-1 Evidence -> Click Hook)
+
+Title generation must be evidence-driven, not metadata-driven:
+
+1. **Source of truth for title content**
+   - `trigger`, `payoff`, `narrative_arc`, and evidence lines discovered in Stage 1/1.5.
+   - Do **not** build titles from boilerplate wrappers like `"chat message from ..."`.
+
+2. **Output split (important)**
+   - `clip_point` = click-worthy hook (curiosity + specificity).
+   - `intelligence_report.*` = dry factual reasoning is allowed and preferred.
+
+3. **Chat-read title rule**
+   - Keep attribution (story belongs to chatter), but avoid dry phrasing.
+   - Preferred: hooky attribution forms (e.g., `"What happens when chat drops a message about ...?"`).
+   - Avoid: `"Streamer reads a chat message about ..."` unless rewritten to be hooky.
+
+4. **Deterministic post-check**
+   - If model emits dry/recursive titles (e.g., `"...about chat message from ..."`), Stage 3 sanitizer rewrites topic wording before final output.
+
+5. **Prompt requirement**
+   - FINAL/PROVISIONAL prompts must explicitly tell Qwen to derive title angle from trigger+payoff evidence and score dry titles low.
 
 ### 4) Duration/Trim Policy
 
@@ -144,6 +182,14 @@ cd ~/twitch-vod-analyzer
 python3 src/synthesis/qwen_clip_analyzer_progressive.py --vod-id <VOD_ID>
 ```
 
+WSL2/Qwen readiness preflight (recommended):
+
+```bash
+curl -sS --max-time 3 http://100.97.240.34:8000/v1/models
+```
+
+If this fails, wait/retry before running analysis (cold start often takes ~1-2 minutes even when container status is `Up`).
+
 Vision-only mode:
 
 ```bash
@@ -189,6 +235,7 @@ Browser-compatible extraction settings (when done manually):
 2. Prompt constraints alone are not sufficient; deterministic post-filters are required.
 3. Full end-to-end one-command orchestration (VOD ID -> share links) is still being hardened.
 4. Integration tests may depend on optional runtime packages/environment not present in every container.
+5. Qwen service readiness lag: after WSL/container restart, `/v1/models` may be unavailable briefly while vLLM loads.
 
 ---
 

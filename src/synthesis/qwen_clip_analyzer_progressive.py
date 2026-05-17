@@ -473,6 +473,34 @@ def run_audio_phase(clips, all_results, fusion, manifest):
 
 # ── Prompts ──────────────────────────────────────────────────────────
 
+PHASE1_TITLE_RESEARCH_SUMMARY = """
+CLICK-WORTHY TITLE RESEARCH SUMMARY (apply this when writing Stage 1 titles):
+- YouTube Help (Thumbnail & title tips): strong titles are accurate, concise, and front-load key words; mismatch/clickbait hurts watch behavior and discoverability.
+- Nielsen Norman Group microcontent guidance: titles must work out of context, be specific/useful, and stay succinct.
+- Nature Human Behaviour (Negativity drives online news consumption, Upworthy RCTs): negative wording can increase CTR (+2.3% per extra negative word on average), but this is a weak nudge — do not force negativity when unsupported by evidence.
+- Scientific Reports (When curiosity gaps backfire): best CTR comes from a balance of specificity + curiosity. Too vague OR too fully explained both underperform.
+
+Operational rule for this pipeline:
+- Build titles from trigger + payoff evidence in this clip.
+- Keep a curiosity gap, but preserve factual accuracy.
+- Avoid metadata phrasing ("chat message from...") and dry summaries.
+"""
+
+PHASE1_TITLE_EXAMPLES = """
+TITLE EXAMPLES (use as style guidance)
+GOOD:
+- "She explains the inside joke right after chat calls it out"
+- "What happens when chat asks about the mystery donation sound?"
+- "The moment she realizes chat already solved it"
+- "Chat drops one message and the whole story changes"
+
+BAD:
+- "Streamer reacts to donation alert"
+- "Streamer reads a chat message about donation alert"
+- "Funny stream moment"
+- "Chat message from user about event"
+"""
+
 ANALYSIS_PROMPT = """You are a Twitch clip analyst. I'll show you frames from a {clip_title} segment ({start}s - {end}s).
 
 Transcript context: {transcript}
@@ -490,6 +518,11 @@ IMPORTANT CONTEXT FOR UNDERSTANDING THE STREAM:
 - The streamer may react emotionally to these alerts (laughing, commenting), then explain the inside joke to new viewers.
 - A clip where the streamer explains an inside joke to a new viewer IS a story arc with setup and payoff. HIGH clip value.
 - A clip where the streamer just reacts to an alert without explanation is a transactional reaction. LOW clip value.
+
+PHASE 1 TITLE RESEARCH BRIEF:
+{phase1_title_research_summary}
+
+{phase1_title_examples}
 
 Analyse these specific frames and return valid JSON only:
 {{{{
@@ -516,6 +549,8 @@ Analyse these specific frames and return valid JSON only:
   "trim_start_reason": "WHY this exact second is where the interesting moment begins — reference the transcript timestamp that triggers it (e.g. 'donation alert at 885s' or 'story starts at 890s')",
   "trim_end_reason": "WHY this exact second is where the moment ends — reference what finishes (e.g. 'laughing ends by 915s' or 'punchline lands at 905s')",
   "narrative_arc": "Chronological summary of what happens in this clip window: what triggers each moment (donation alert? chat message? story?), what the streamer does, and what the actual interesting moment is.",
+  "clip_point": "CLICK-WORTHY TITLE (max 12 words). Must follow PHASE 1 TITLE RESEARCH BRIEF and be evidence-grounded in trigger+payoff.",
+  "title_why": "1 sentence: why this title balances specificity + curiosity and remains accurate to the clip evidence.",
   "comparative_note": "How this compares to previously analysed clips in this VOD",
   "reason": "why this would (or wouldn't) make a good clip"
 }}}}
@@ -561,6 +596,11 @@ HIGH-SCORE GATE:
   (1) clear trigger,
   (2) clear payoff,
   (3) non-transactional narrative value.
+
+TITLE RULE (Stage 1):
+- Provide clip_point for every clip.
+- clip_point must be <=12 words, evidence-grounded in trigger+payoff, and avoid dry metadata phrasing.
+- For chat-read clips, keep attribution to chat while preserving hook quality.
 
 IMPORTANT: Stage 1 is discovery-only. Do not perform final title optimization or final platform recommendation decisions here.
 
@@ -626,7 +666,7 @@ IMPORTANT RULES:
 - NARRATIVE QUALITY matters more than emotional energy. A transactional reaction (donation/sub alert) is LOW value. A story or chat banter is HIGH value.
 - DEAD AIR RULE: Check the ⚠️ DEAD AIR DETECTED warnings in the analysis log. If a clip has a single silence gap > 10 seconds, apply a -5 penalty to its score (max final score 5/10). If total silence > 30% of window, score ≤ 5. Discard clips with too much dead air.
 - DEDUP RULE: Each clip has a unique clip_id (e.g. 'Clip at 998s'). NEVER assign the same clip_point/title to two different clips. If two clips have similar content, differentiate their titles. When in doubt, reference the clip_id as an anchor.
-- TITLE RULE: Each clip's clip_point MUST be a click-worthy title following one of the proven patterns (reaction pattern, question bait, punchy one-liner, etc.). The title should make someone WANT to click, not just describe what happens.
+- TITLE RULE: Each clip's clip_point MUST be click-worthy and curiosity-inducing. Do NOT use dry descriptions. For chat-read clips, preserve attribution but use hooky phrasing (e.g. 'What happens when chat drops a message about ...?'). Avoid bland forms like 'Streamer reads a chat message about ...'.
 - PLATFORM RULE: For each clip, provide platform_recommendations — an explicit list of which platforms to actually post to. Only include platforms where the clip genuinely fits (score >= 6). Can recommend multiple platforms. Empty list if none.
 - TRIM RULE: Narrow suggested_trim_start/end as much as you can, but provide trim_start_reason and trim_end_reason explaining WHY those seconds are the boundaries (reference transcript timestamps).
 - DURATION POLICY (research-guided): no minimum trim length requirement. Prefer the shortest trim that preserves setup + payoff and standalone clarity.
@@ -708,7 +748,7 @@ Return valid JSON only:
       "duration_penalty_applied": "INTEGER 0..3 based on DURATION POLICY below (0 optimal, 3 worst)",
       "trim_start_reason": "Cite the exact trigger at this second.",
       "trim_end_reason": "Cite what resolves/ends at this second.",
-      "clip_point": "CLICK-WORTHY TITLE (1 sentence max). Use a proven pattern: reaction-based ('Streamer [reaction] after [trigger]'), question bait ('What happens when...?'), or short + punchy ('She had ONE job'). NO dry descriptions.",
+      "clip_point": "CLICK-WORTHY TITLE (1 sentence max). Use a proven pattern: reaction-based ('Streamer [reaction] after [trigger]'), question bait ('What happens when...?'), or short + punchy ('She had ONE job'). NO dry descriptions. For chat-read clips, keep attribution but make it hooky (e.g. 'What happens when chat drops a message about ...?').",
     }}}}
   ],
   "overall_vod_assessment": "final summary paragraph",
@@ -720,6 +760,7 @@ IMPORTANT RULES:
 - "final_selected_clips" can be empty, 1, or many. No fixed limit on the number of clips.
 - NARRATIVE QUALITY matters more than emotional energy. Prioritize clips with stories, chat banter, or organic moments over transactional reactions.
 - DEDUP RULE: Each clip has a unique clip_id (e.g. 'Clip at 998s'). NEVER assign the same clip_point/title to two different clips. Each clip MUST have a unique title. Differentiate similar clips by focusing on what makes each moment distinct.
+- TITLE RULE: clip_point must be click-worthy (reaction, question-bait, or punchy one-liner). Keep factual attribution in analysis fields, but title must maximize curiosity. For chat-read clips, keep attribution while still hooky (e.g. 'What happens when chat drops a message about ...?'). Avoid dry forms like 'Streamer reads a chat message about ...'.
 - DEAD AIR RULE: Check for ⚠️ DEAD AIR DETECTED in the analysis log. If a single silence gap > 10 seconds exists, that clip must have a -5 penalty applied (max final score 5/10). If total silence > 30% of window, score ≤ 5. Discard clips with unacceptable dead air. Ambient atmosphere is NOT dead air — differentiate.
 - For each selected clip, provide suggested_trim_start and suggested_trim_end to capture only the relevant moment.
 - DURATION POLICY (research-guided): no minimum trim length requirement. Prefer the shortest trim that preserves setup + payoff and standalone clarity.
@@ -799,6 +840,8 @@ def build_analysis_log_entry(r):
     """Format a single clip result for inclusion in synthesis context."""
     a = r.get("analysis", {})
     label = f"Clip at {r['start']}s (clip_id={r['start']})"
+    title_hint = a.get("clip_point") or ""
+
     if a.get("revised_clip_worthiness") is not None:
         entry = (
             f"{label}: score={a.get('revised_clip_worthiness','?')}/10 (revised from {a.get('clip_worthiness','?')}), "
@@ -809,7 +852,7 @@ def build_analysis_log_entry(r):
             f"trim={a.get('suggested_trim_start','?')}-{a.get('suggested_trim_end','?')}s, reason={a.get('trim_start_reason','')[:40]}->{a.get('trim_end_reason','')[:40]}, "
             f"arc={a.get('narrative_arc','')[:60]}, "
             f"platform_scores={a.get('platform_scores','?')}, "
-            f"point={a.get('clip_point','')[:80]}, "
+            f"point={title_hint[:80]}, "
             f"reason={a.get('revised_reason', a.get('reason',''))[:120]}"
         )
     else:
@@ -822,7 +865,7 @@ def build_analysis_log_entry(r):
             f"trim={a.get('suggested_trim_start','?')}-{a.get('suggested_trim_end','?')}s, reason={a.get('trim_start_reason','')[:40]}->{a.get('trim_end_reason','')[:40]}, "
             f"arc={a.get('narrative_arc','')[:60]}, "
             f"platform_scores={a.get('platform_scores','?')}, "
-            f"point={a.get('clip_point','')[:80]}, "
+            f"point={title_hint[:80]}, "
             f"reason={a.get('reason','')[:120]}"
         )
     return entry
@@ -881,6 +924,8 @@ def run():
                 chat_messages=chat_act,
                 yolo_objects=", ".join(yolo_objs) if yolo_objs else "none",
                 batch_context=batch_context,
+                phase1_title_research_summary=PHASE1_TITLE_RESEARCH_SUMMARY,
+                phase1_title_examples=PHASE1_TITLE_EXAMPLES,
                 platform_guide=PLATFORM_SCORING_GUIDE,
             )
 
@@ -944,10 +989,19 @@ def run():
 
     # ── Stage 1.5: Deterministic cross-window stitching ──
     discoveries = [r.get("discovery") for r in all_results if isinstance(r.get("discovery"), dict)]
-    stitched_candidates = stitch_discoveries(discoveries, max_gap_seconds=20)
+    stitch_debug_decisions = []
+    stitched_candidates = stitch_discoveries(
+        discoveries,
+        max_gap_seconds=20,
+        max_bridge_gap_seconds=45,
+        debug_decisions=stitch_debug_decisions,
+    )
+    merged_pair_count = sum(1 for d in stitch_debug_decisions if d.get("merged") is True)
+    evaluated_pair_count = len([d for d in stitch_debug_decisions if "left_window" in d and "right_window" in d])
     log(
         f"Stage 1.5 stitching: {len(discoveries)} discovery candidate(s) -> "
-        f"{len(stitched_candidates)} stitched arc(s)"
+        f"{len(stitched_candidates)} stitched arc(s); "
+        f"pair evaluations={evaluated_pair_count}, merged pairs={merged_pair_count}"
     )
 
     # Stage 2 scoring depends on audio_structured context, so it runs after
@@ -1273,6 +1327,7 @@ def run():
         "clips_with_extra_frames": frames_served,
         "clip_details": all_results,
         "stage1_5_stitched": stitched_candidates,
+        "stage1_5_stitch_debug": stitch_debug_decisions,
         "stage2_scored": scored_candidates,
         "stage3_final_selected": stage3_final_selected,
         "rejected_clips": rejected_clips,

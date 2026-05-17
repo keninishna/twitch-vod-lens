@@ -51,6 +51,11 @@ def map_analysis_to_discovery(clip: Dict, analysis: Dict) -> Dict:
         evidence_lines.append(reason)
     if narrative_arc:
         evidence_lines.append(f"narrative_arc: {narrative_arc}")
+
+    title = str(analysis.get("clip_point") or "").strip()
+    if title:
+        evidence_lines.append(f"clip_point: {title}")
+
     if not evidence_lines:
         evidence_lines.append("No direct evidence provided by model output")
 
