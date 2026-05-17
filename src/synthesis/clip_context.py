@@ -186,8 +186,9 @@ def render_prompt_context(context: Dict, transcript_char_limit: int = 2000) -> T
                 f"'{item.get('message','')[:80]}...' — streamer reads this aloud."
             )
         transcript_text += (
-            "\nIMPORTANT: When a chat message appears in the transcript, it is the "
-            "CHATTER's story, not the streamer's. Titles MUST say 'reads a chat message about...'."
+            "\nREMINDER: When a chat message appears in the transcript, it is often the "
+            "CHATTER's story and the streamer may be reading it aloud. Keep attribution accurate "
+            "and avoid framing it as the streamer's personal claim unless evidence supports that."
         )
 
     transcript_text = transcript_text[:transcript_char_limit]

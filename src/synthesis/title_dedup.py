@@ -48,17 +48,95 @@ def is_near_duplicate_title(a: str, b: str, threshold: float = 0.75) -> bool:
     return jaccard >= threshold
 
 
-def _generate_title(stitched: Dict, analysis: Dict) -> str:
-    clip_point = str(analysis.get("clip_point") or "").strip()
-    if clip_point:
-        return clip_point
+def _extract_chat_topic(*texts: str) -> str:
+    """Extract a concise chat-story topic from noisy trigger/title text.
 
+    Handles patterns like:
+    - "chat message from 'user' about a streak"
+    - "chat message at 118s: '...mclaren owner...'"
+    """
+
+    for raw in texts:
+        if not raw:
+            continue
+
+        # Split on stitch joins so we can pick the cleanest fragment.
+        fragments = [frag.strip() for frag in str(raw).split("|") if frag.strip()]
+        for frag in fragments:
+            text = frag.strip(" .")
+            if not text:
+                continue
+
+            # Drop repeated chat-message boilerplate + user/time metadata.
+            text = re.sub(
+                r"^chat message(?:\s+from\s+['\"`]?[^'\":|]+['\"`]?)?(?:\s+at\s+\d+s)?\s*[:,-]?\s*",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            )
+
+            # Prefer the semantic payload after "about ..." when available.
+            about_match = re.search(r"\babout\b\s+(.+)", text, flags=re.IGNORECASE)
+            candidate = about_match.group(1) if about_match else text
+
+            # If the candidate still starts with chat metadata, strip it again.
+            candidate = re.sub(
+                r"^chat message(?:\s+from\s+['\"`]?[^'\":|]+['\"`]?)?(?:\s+at\s+\d+s)?\s*[:,-]?\s*",
+                "",
+                candidate,
+                flags=re.IGNORECASE,
+            )
+
+            # Handle nested forms like "chat message from X about Y".
+            nested_about = re.search(r"\babout\b\s+(.+)", candidate, flags=re.IGNORECASE)
+            if nested_about and "chat message" in candidate.lower():
+                candidate = nested_about.group(1)
+
+            candidate = candidate.strip(" ' \".,;:-")
+            if candidate.lower().startswith("about "):
+                candidate = candidate[6:].strip(" ' \".,;:-")
+            if not candidate:
+                continue
+
+            low = candidate.lower()
+            if low in {"chat message", "message", "the message"}:
+                continue
+
+            # Collapse extra whitespace.
+            candidate = re.sub(r"\s+", " ", candidate)
+            if candidate:
+                return candidate
+
+    return "a viewer story"
+
+
+def _sanitize_chat_title(title: str, trigger: str, payoff: str) -> str:
+    low = (title or "").lower()
+
+    # Repair only clearly broken/recursive forms like
+    # "...about chat message from X about Y".
+    if "reads a chat message about chat message" in low or "about chat message from" in low:
+        topic = _extract_chat_topic(title, trigger, payoff)
+        return f"What happens when chat drops a message about {topic[:62]}?"
+
+    return title
+
+
+def _generate_title(stitched: Dict, analysis: Dict) -> str:
     narrative_type = str(stitched.get("narrative_type") or "moment")
     trigger = str(stitched.get("trigger") or "a key moment")
     payoff = str(stitched.get("payoff") or "a strong payoff")
 
-    if "chat" in narrative_type:
-        return f"Streamer reads a chat message about {trigger[:60].lower()}"
+    clip_point = str(analysis.get("clip_point") or "").strip()
+    if clip_point:
+        # Keep Stage-1 title intent by default; only repair clearly broken chat recursion.
+        if "chat" in narrative_type.lower():
+            return _sanitize_chat_title(clip_point, trigger, payoff)
+        return clip_point
+
+    if "chat" in narrative_type.lower():
+        topic = _extract_chat_topic(trigger, payoff)
+        return f"What happens when chat drops a message about {topic[:62]}?"
 
     return f"The moment {trigger[:45].lower()} led to {payoff[:45].lower()}"
 
