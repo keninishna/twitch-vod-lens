@@ -113,6 +113,20 @@ def safe_json_parse(raw):
     except json.JSONDecodeError:
         return None
 
+def _as_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _as_int(value, default=0):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def qwen_call(payload, timeout=90):
     """POST payload to Qwen vLLM endpoint. Returns parsed JSON content."""
     import requests
