@@ -100,3 +100,157 @@ def test_finalize_stage3_candidates_suppresses_duplicate_titles_and_ranks_by_sco
     assert final[0]["rank"] == 1
     assert final[0]["clip_id"] == "stitched_100_220_1"
     assert final[0]["clip_point"].lower().startswith("the moment")
+
+
+def test_finalize_stage3_candidates_fallback_selects_top_n_when_no_clip_meets_gate():
+    scored = [
+        {
+            "candidate_id": "stitched_100_220_1",
+            "start": 100,
+            "end": 220,
+            "final_score": 7.5,
+            "raw_score": 8.0,
+            "eligible_for_final": False,
+            "penalty_trace": [],
+            "hard_gates": [],
+            "rejection_reasons": ["below_score_threshold"],
+            "trim_source": "qwen",
+        },
+        {
+            "candidate_id": "stitched_222_320_2",
+            "start": 222,
+            "end": 320,
+            "final_score": 6.8,
+            "raw_score": 7.2,
+            "eligible_for_final": False,
+            "penalty_trace": [],
+            "hard_gates": [],
+            "rejection_reasons": ["below_score_threshold"],
+            "trim_source": "qwen",
+        },
+        {
+            "candidate_id": "stitched_330_440_3",
+            "start": 330,
+            "end": 440,
+            "final_score": 5.9,
+            "raw_score": 6.1,
+            "eligible_for_final": False,
+            "penalty_trace": [],
+            "hard_gates": [],
+            "rejection_reasons": ["below_score_threshold"],
+            "trim_source": "qwen",
+        },
+        {
+            "candidate_id": "stitched_450_560_4",
+            "start": 450,
+            "end": 560,
+            "final_score": 4.1,
+            "raw_score": 4.8,
+            "eligible_for_final": False,
+            "penalty_trace": [],
+            "hard_gates": [],
+            "rejection_reasons": ["below_score_threshold"],
+            "trim_source": "qwen",
+        },
+    ]
+
+    stitched = [
+        {
+            "stitched_id": "stitched_100_220_1",
+            "start": 100,
+            "end": 220,
+            "narrative_type": "chat_reveal",
+            "trigger": "question",
+            "payoff": "answer",
+            "evidence_lines": ["[120s] ..."],
+            "confidence": 0.8,
+            "source_candidate_ids": ["cand_100"],
+            "source_windows": [[100, 220]],
+            "merge_reasons": ["single_candidate"],
+        },
+        {
+            "stitched_id": "stitched_222_320_2",
+            "start": 222,
+            "end": 320,
+            "narrative_type": "chat_banter",
+            "trigger": "question",
+            "payoff": "answer",
+            "evidence_lines": ["[250s] ..."],
+            "confidence": 0.78,
+            "source_candidate_ids": ["cand_222"],
+            "source_windows": [[222, 320]],
+            "merge_reasons": ["single_candidate"],
+        },
+        {
+            "stitched_id": "stitched_330_440_3",
+            "start": 330,
+            "end": 440,
+            "narrative_type": "storytelling",
+            "trigger": "story start",
+            "payoff": "story end",
+            "evidence_lines": ["[350s] ..."],
+            "confidence": 0.74,
+            "source_candidate_ids": ["cand_330"],
+            "source_windows": [[330, 440]],
+            "merge_reasons": ["single_candidate"],
+        },
+        {
+            "stitched_id": "stitched_450_560_4",
+            "start": 450,
+            "end": 560,
+            "narrative_type": "ambient",
+            "trigger": "none",
+            "payoff": "none",
+            "evidence_lines": ["[470s] ..."],
+            "confidence": 0.55,
+            "source_candidate_ids": ["cand_450"],
+            "source_windows": [[450, 560]],
+            "merge_reasons": ["single_candidate"],
+        },
+    ]
+
+    analysis_by_candidate = {
+        "stitched_100_220_1": {
+            "clip_point": "She breaks down the streak mechanic",
+            "suggested_trim_start": 130,
+            "suggested_trim_end": 170,
+            "platform_scores": {"twitch": 7},
+            "platform_recommendations": ["twitch"],
+        },
+        "stitched_222_320_2": {
+            "clip_point": "Chat pushes her into a quick explainer",
+            "suggested_trim_start": 245,
+            "suggested_trim_end": 280,
+            "platform_scores": {"twitch": 7},
+            "platform_recommendations": ["twitch"],
+        },
+        "stitched_330_440_3": {
+            "clip_point": "Gym story lands with a clean payoff",
+            "suggested_trim_start": 350,
+            "suggested_trim_end": 390,
+            "platform_scores": {"twitch": 6},
+            "platform_recommendations": ["twitch"],
+        },
+        "stitched_450_560_4": {
+            "clip_point": "Low-energy ambient segment",
+            "suggested_trim_start": 470,
+            "suggested_trim_end": 510,
+            "platform_scores": {"twitch": 5},
+            "platform_recommendations": [],
+        },
+    }
+
+    final = finalize_stage3_candidates(
+        scored_candidates=scored,
+        stitched_candidates=stitched,
+        analysis_by_candidate=analysis_by_candidate,
+        min_score=8.0,
+        fallback_top_n_when_empty=3,
+    )
+
+    assert len(final) == 3
+    assert [c["clip_id"] for c in final] == [
+        "stitched_100_220_1",
+        "stitched_222_320_2",
+        "stitched_330_440_3",
+    ]

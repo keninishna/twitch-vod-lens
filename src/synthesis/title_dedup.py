@@ -69,8 +69,13 @@ def finalize_stage3_candidates(
     analysis_by_candidate: Dict[str, Dict],
     min_score: float = 8.0,
     max_clips: int = 20,
+    fallback_top_n_when_empty: int = 0,
 ) -> List[Dict]:
-    """Return ranked final clip payloads with duplicate suppression."""
+    """Return ranked final clip payloads with duplicate suppression.
+
+    Normal path: only eligible clips at/above min_score.
+    Optional fallback: when normal path is empty, take top-N by final_score.
+    """
 
     stitched_by_id = {s.get("stitched_id"): s for s in stitched_candidates}
 
@@ -78,6 +83,14 @@ def finalize_stage3_candidates(
         s for s in scored_candidates
         if s.get("eligible_for_final") and float(s.get("final_score", 0)) >= float(min_score)
     ]
+
+    if not prelim and fallback_top_n_when_empty > 0:
+        scored_with_stitched = [
+            s for s in scored_candidates if stitched_by_id.get(s.get("candidate_id")) is not None
+        ]
+        scored_with_stitched.sort(key=lambda x: float(x.get("final_score", 0)), reverse=True)
+        prelim = scored_with_stitched[: int(fallback_top_n_when_empty)]
+
     prelim.sort(key=lambda x: float(x.get("final_score", 0)), reverse=True)
 
     selected: List[Dict] = []

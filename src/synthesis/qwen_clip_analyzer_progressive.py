@@ -1245,7 +1245,16 @@ def run():
         stitched_candidates=stitched_candidates,
         analysis_by_candidate=analysis_by_stitched_id,
         min_score=8.0,
+        fallback_top_n_when_empty=3,
     )
+    passed_hard_gate = sum(
+        1 for s in scored_candidates
+        if s.get("eligible_for_final") and _as_float(s.get("final_score"), 0.0) >= 8.0
+    )
+    if passed_hard_gate == 0 and stage3_final_selected:
+        log(
+            f"Stage 3 fallback activated: no clips scored >=8, selected top {len(stage3_final_selected)} clip(s) by final_score"
+        )
     log(f"Stage 3 title/dedup pass selected {len(stage3_final_selected)} clip(s)")
 
     # Keep model ranking as reference, but enforce Stage 3 deterministic list as
