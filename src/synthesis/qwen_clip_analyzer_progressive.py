@@ -1251,7 +1251,8 @@ def run():
         1 for s in scored_candidates
         if s.get("eligible_for_final") and _as_float(s.get("final_score"), 0.0) >= 8.0
     )
-    if passed_hard_gate == 0 and stage3_final_selected:
+    fallback_mode = passed_hard_gate == 0 and bool(stage3_final_selected)
+    if fallback_mode:
         log(
             f"Stage 3 fallback activated: no clips scored >=8, selected top {len(stage3_final_selected)} clip(s) by final_score"
         )
@@ -1452,7 +1453,9 @@ def run():
         s["trim_source"] = rescored.get("trim_source", s.get("trim_source"))
         s["rank"] = len(rescored_selected) + 1
 
-        if rescored.get("eligible_for_final") and _as_float(rescored.get("final_score"), 0.0) >= 8.0:
+        if fallback_mode:
+            rescored_selected.append(s)
+        elif rescored.get("eligible_for_final") and _as_float(rescored.get("final_score"), 0.0) >= 8.0:
             rescored_selected.append(s)
         else:
             reason_codes = list(rescored.get("rejection_reasons") or [])
