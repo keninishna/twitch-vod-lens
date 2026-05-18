@@ -1,37 +1,23 @@
-"""Kill old pipeline, re-pull, start fresh."""
-import sys, time
-try:
-    import pexpect
-except ImportError:
-    import subprocess
-    subprocess.run([sys.executable, "-m", "pip", "install", "pexpect", "-q"], capture_output=True)
-    import pexpect
+"""Start fresh pipeline run with Bee ready."""
+import pexpect, time
 
-child = pexpect.spawn(
-    'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null john@100.97.240.34',
-    timeout=15, encoding='utf-8', echo=False
-)
-child.expect(['password:', pexpect.TIMEOUT], timeout=10)
-child.sendline('Sparky1234')
+p = pexpect.spawn('ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR john@100.97.240.34', timeout=600, encoding='utf-8')
+p.expect('password:', timeout=10)
+p.sendline('Sparky1234')
 time.sleep(2)
-child.sendline('')
-child.expect('[$#>]', timeout=5)
+p.sendline('')
+p.expect('[$#>]', timeout=5)
 
 # Kill any running pipeline
-child.sendline('pkill -f "qwen_clip_analyzer" 2>&1; echo "killed"')
-child.expect('[$#>]', timeout=5)
+p.sendline('pkill -f "qwen_clip_analyzer" 2>/dev/null; pkill -f "qwen_clip" 2>/dev/null')
+p.expect('[$#)>
 
-# Re-pull
-child.sendline('cd ~/twitch-vod-analyzer && git pull 2>&1')
-child.expect('[$#>]', timeout=10)
+# Run pipeline
+p.sendline('cd ~/twitch-vod-analyzer && PYTHONPATH=. python3 -u src/synthesis/qwen_clip_analyzer_progressive.py --vod-id 2770929139 --skip-audio > /tmp/pipeline_merge.log 2>&1 &')
+p.expect('[$#>]', timeout=5)
+p.sendline('echo "PID=$!"')
+p.expect('[$#>]', timeout=5)
+print('PID:', (p.before or '')[:200])
 
-# Start fresh pipeline
-child.sendline('cd ~/twitch-vod-analyzer && PYTHONPATH=. python3 -u src/synthesis/qwen_clip_analyzer_progressive.py --vod-id 2770929139 --skip-audio > /tmp/pipeline_run5.log 2>&1 &')
-child.expect('[$#>]', timeout=5)
-child.sendline('echo "PID=$!"')
-child.expect('[$#>]', timeout=5)
-print("=== STARTED ===")
-print(child.before[:500] if child.before else "")
-
-child.sendline('exit')
-child.expect(pexpect.EOF, timeout=3)
+p.sendline('exit')
+p.expect(pexpect.EOF, timeout=3)

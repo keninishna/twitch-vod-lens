@@ -1329,9 +1329,23 @@ def run():
             ms = mc.get("start")
             if ms is not None:
                 qwen_by_start[ms] = mc
+            # Also index by suggested_trim_start since Qwen reports start as trim start
+            ts = mc.get("suggested_trim_start")
+            if ts is not None:
+                qwen_by_start[ts] = mc
 
         for clip in stage3_final_selected:
-            qc = qwen_by_start.get(clip.get("start"))
+            cstart = clip.get("start")
+            cend = clip.get("end")
+            # Try exact match first, then trim_start match, then range match
+            qc = qwen_by_start.get(cstart)
+            if not qc and cend:
+                # Fallback: find any Qwen clip whose start falls within [cstart, cend]
+                for mc in model_clips:
+                    ms = mc.get("start")
+                    if ms is not None and cstart <= ms <= cend:
+                        qc = mc
+                        break
             if not qc:
                 continue
 
