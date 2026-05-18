@@ -139,18 +139,29 @@ def _score_pair_merge(
 
 
 def _aggregate_cluster(cluster: List[Dict], stitched_idx: int, merge_reasons: Optional[List[str]] = None) -> Dict:
+    """Merge clip discoveries into a stitched arc.
+
+    For multi-cluster arcs (stitched together via pairwise merge), the stitched
+    arc inherits its start/end/trigger/payoff from the **best-rated clip** by
+    clip_worthiness. This prevents weak clips in the arc from dragging down
+    the scoring — the stitched arc represents the best moment, not a confused
+    aggregate of all moments.
+    """
+    # Find best clip by clip_worthiness to use as the representative
+    def _get_worthiness(c):
+        return _as_float(c.get("clip_worthiness", c.get("score", 0)), 0.0)
+
+    best = max(cluster, key=_get_worthiness) if len(cluster) > 1 else cluster[0]
+
     starts = [_as_int(c.get("start"), 0) for c in cluster]
     ends = [_as_int(c.get("end"), 0) for c in cluster]
 
     narrative_counter = Counter(str(c.get("narrative_type") or "unknown") for c in cluster)
     narrative_type = narrative_counter.most_common(1)[0][0]
 
-    trigger = " | ".join(
-        _dedupe_preserve_order(str(c.get("trigger") or "") for c in cluster if c.get("trigger"))
-    ) or "Model did not provide explicit trigger"
-    payoff = " | ".join(
-        _dedupe_preserve_order(str(c.get("payoff") or "") for c in cluster if c.get("payoff"))
-    ) or "Model did not provide explicit payoff"
+    # Use the best clip's trigger/payoff directly — not a concatenation
+    trigger = str(best.get("trigger") or "") or "Model did not provide explicit trigger"
+    payoff = str(best.get("payoff") or "") or "Model did not provide explicit payoff"
 
     evidence: List[str] = []
     for c in cluster:
@@ -167,8 +178,9 @@ def _aggregate_cluster(cluster: List[Dict], stitched_idx: int, merge_reasons: Op
 
     stitched = {
         "stitched_id": f"stitched_{min(starts)}_{max(ends)}_{stitched_idx}",
-        "start": min(starts),
-        "end": max(ends),
+        # Use best clip's boundaries so scoring sees a tight, relevant window
+        "start": _as_int(best.get("start"), min(starts)),
+        "end": _as_int(best.get("end"), max(ends)),
         "narrative_type": narrative_type,
         "trigger": trigger,
         "payoff": payoff,
@@ -189,6 +201,7 @@ def stitch_discoveries(
     min_shared_tokens: int = 2,
     max_bridge_gap_seconds: int = 45,
     max_cluster_span_seconds: int = 240,
+    max_cluster_size: int = 2,
     debug_decisions: Optional[List[Dict]] = None,
 ) -> List[Dict]:
     """Deterministically stitch discoveries with pairwise graph merging.
@@ -200,8 +213,9 @@ def stitch_discoveries(
     - pair gap <= max_bridge_gap_seconds, and
     - weighted evidence score >= threshold (or strict local adjacency rule).
 
-    Component guard:
+    Component guards:
     - merged component span cannot exceed max_cluster_span_seconds.
+    - merged component cannot contain more than max_cluster_size clips.
     """
 
     ordered = sorted(discoveries, key=lambda d: (_as_int(d.get("start"), 0), _as_int(d.get("end"), 0)))
@@ -273,6 +287,22 @@ def stitch_discoveries(
                     "reasons": ["span_guard_exceeded"],
                     "component_span_seconds": merged_span,
                     "max_cluster_span_seconds": max_cluster_span_seconds,
+                })
+            continue
+
+        # Size guard: merged component must not exceed max_cluster_size clips
+        component_indices = [k for k in range(n) if find(k) == ri or find(k) == rj]
+        if len(component_indices) > max_cluster_size:
+            if debug_decisions is not None:
+                debug_decisions.append({
+                    "left_candidate_id": _candidate_id(ordered[i]),
+                    "right_candidate_id": _candidate_id(ordered[j]),
+                    "gap_seconds": gap,
+                    "score": score,
+                    "merged": False,
+                    "reasons": [f"cluster_size_guard_exceeded(max={max_cluster_size}, size={len(component_indices)})"],
+                    "component_size": len(component_indices),
+                    "max_cluster_size": max_cluster_size,
                 })
             continue
 
