@@ -99,7 +99,7 @@ def normalize_clip_analysis(
         score_cap = min(score_cap, float(max_score))
         add_gate(code, f"cap<={int(max_score) if float(max_score).is_integer() else max_score}")
 
-    # Trim validation gates
+# Trim validation — clamp small overruns instead of hard-rejecting
     if end <= start:
         reject("invalid_candidate_window")
 
@@ -107,7 +107,14 @@ def normalize_clip_analysis(
         reject("invalid_trim_range")
 
     if trim_start < start or trim_end > end:
-        reject("trim_out_of_bounds")
+        # Clamp to candidate bounds; small overruns are common with Qwen
+        clamped_start = max(trim_start, start)
+        clamped_end = min(trim_end, end)
+        if clamped_end <= clamped_start:
+            reject("trim_out_of_bounds")
+        else:
+            add_penalty("trim_clamped_to_bounds", 0.5)
+            trim_start, trim_end = clamped_start, clamped_end
 
     # Dead-air policies
     dead_air_gaps = context.get("dead_air_gaps") or []
@@ -117,9 +124,9 @@ def normalize_clip_analysis(
     for gap in dead_air_gaps:
         longest_gap = max(longest_gap, _as_float(gap.get("duration"), 0.0))
 
-    if longest_gap > 10:
-        add_penalty("dead_air_single_gap_gt_10", 5)
-        cap(5, "dead_air_single_gap_gt_10")
+    if longest_gap > 20:
+        add_penalty("dead_air_single_gap_gt_20", 3)
+        cap(6, "dead_air_single_gap_gt_20")
 
     if dead_air_ratio > 0.30:
         cap(5, "dead_air_ratio_gt_30pct")
@@ -139,8 +146,7 @@ def normalize_clip_analysis(
         reject("no_narrative_payoff")
 
     if requires_context:
-        cap(5, "context_required")
-        reject("context_required")
+        add_penalty("context_required", 1.5)
 
     if transactional and len(narrative_arc.strip()) < 20:
         cap(4, "transactional_without_narrative_arc")
