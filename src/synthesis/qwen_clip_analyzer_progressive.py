@@ -42,6 +42,43 @@ from src.synthesis.stage1_discovery import (
 from src.synthesis.stitching import stitch_discoveries
 from src.synthesis.title_dedup import finalize_stage3_candidates
 
+# ── Bee API health check ──────────────────────────────────────────────
+
+def wait_for_bee_api(timeout: int = 300, check_interval: int = 5):
+    """Block until the Bee API responds on /v1/models.
+
+    Polls every *check_interval* seconds, logs progress every 30s.
+    Returns True if API became ready, False if timeout was reached.
+    """
+    import urllib.request
+    import urllib.error
+
+    log("  Preflight: Checking Bee API readiness ...")
+    ready = False
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            req = urllib.request.Request(
+                "http://100.97.240.34:8082/v1/models"
+            )
+            resp = urllib.request.urlopen(req, timeout=check_interval)
+            model_data = json.loads(resp.read().decode())
+            if model_data:
+                ready = True
+                break
+        except Exception:
+            elapsed = time.time() - t0
+            if int(elapsed) % 30 < check_interval:
+                log(f"    Waiting... ({elapsed:.0f}s)")
+            time.sleep(check_interval)
+
+    if ready:
+        log(f"  ✅ Bee API ready after {time.time() - t0:.0f}s")
+    else:
+        log(f"  ❌ Bee API not ready within {timeout}s timeout — continuing anyway")
+    return ready
+
+
 # ── Configuration (tweak per VOD / model) ────────────────────────────
 
 QWEN_API_URL = "http://100.97.240.34:8082/v1/chat/completions"
@@ -837,6 +874,10 @@ def build_analysis_log_entry(r):
 
 def run():
     log(f"Loading data for VOD {VOD_ID} ...")
+
+    # Preflight: wait for Bee API if it's not already running
+    wait_for_bee_api()
+
     fusion = load_json(FUSION_PATH)
     manifest = load_json(CLIP_MANIFEST_PATH)
     clips = manifest.get("clips", [])
