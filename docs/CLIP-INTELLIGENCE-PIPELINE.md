@@ -1,7 +1,7 @@
 # VOD Lens — Clip Intelligence Pipeline (Compressed)
 
 > **Status:** Active Development
-> **Last Updated:** May 17, 2026 (Stage 1 direct title contract + WSL2/Qwen readiness troubleshooting)
+> **Last Updated:** May 17, 2026 (Switched from vLLM to BeeLlama.cpp for inference)
 > **Repo:** https://github.com/keninishna/twitch-vod-lens
 
 ## Purpose
@@ -27,20 +27,27 @@ Preprocessing (transcript + scenes + YOLO + chat)
   -> Clip extraction + Nextcloud upload + public share links
 ```
 
-### Current Workstream (May 17, 2026)
+### Current Workstream (May 17, 2026 — BeeLlama switch)
 
-1. **Stage 1 title quality pass (active)**
+1. **Inference backend switched to BeeLlama.cpp** (replaces vLLM)
+   - Precision setup: Qwen3.6-27B-Q5_K_S target + DFlash Q4_K_M draft
+   - Port changed from `8000` → **`8082`** (already updated in pipeline code)
+   - Vision tower in VRAM via `--mmproj mmproj-BF16.gguf` (no `--no-mmproj-offload`)
+   - DFlash speculative decoding active (~145 tok/s, ~40% draft acceptance)
+   - Thinking mode enabled: `reasoning_content` and `content` fields split
+   - Context size: **200K tokens** via TurboQuant (`turbo4` K, `turbo3_tcq` V)
+   - Bee auto-restart integrated into audio phase (replaces docker stop/run cycle)
+
+2. **Stage 1 title quality pass (active)**
    - Added a compact research brief to Stage 1 prompt (YouTube/NNg/curiosity-gap guidance).
    - Stage 1 now emits direct draft title fields:
      - `clip_point`
      - `title_why`
    - Removed provisional-named fields/fallback layering for this path.
 
-2. **Qwen/vLLM reliability hardening (active)**
-   - Verified current WSL2 endpoint path is `100.97.240.34:8000`.
-   - Observed real failure mode: WSL2/Tailscale offline + vLLM cold start window.
-   - During cold start, container can be `Up` while `/v1/models` still returns connection refused for ~1-2 minutes.
-   - Next stabilization step: add deterministic preflight wait-for-readiness gate before batch analysis.
+3. **Endpoints (current)**
+   - Bee inference API: `100.97.240.34:8082`
+   - Model: `Qwen3.6-27B-Q5_K_S.gguf` (not HuggingFace ID)
 
 ### Stage Invariants (Non-Negotiable)
 
@@ -182,10 +189,10 @@ cd ~/twitch-vod-analyzer
 python3 src/synthesis/qwen_clip_analyzer_progressive.py --vod-id <VOD_ID>
 ```
 
-WSL2/Qwen readiness preflight (recommended):
+Preflight check (Bee API readiness on port 8082):
 
 ```bash
-curl -sS --max-time 3 http://100.97.240.34:8000/v1/models
+curl -sS --max-time 3 http://100.97.240.34:8082/v1/models
 ```
 
 If this fails, wait/retry before running analysis (cold start often takes ~1-2 minutes even when container status is `Up`).
@@ -235,11 +242,35 @@ Browser-compatible extraction settings (when done manually):
 2. Prompt constraints alone are not sufficient; deterministic post-filters are required.
 3. Full end-to-end one-command orchestration (VOD ID -> share links) is still being hardened.
 4. Integration tests may depend on optional runtime packages/environment not present in every container.
-5. Qwen service readiness lag: after WSL/container restart, `/v1/models` may be unavailable briefly while vLLM loads.
+5. **Bee service must be started before pipeline run** — no auto-start yet (manual via `~/beellama.cpp/build/bin/llama-server …`). Cold start ~60s.
+6. `response_format: json_object` not supported by llama.cpp — rely on prompt enforcement + `safe_json_parse` fallback. Verified working: clean JSON output when system prompt says "output ONLY valid JSON".
 
 ---
 
 ## Dev Workflow
+
+### Pre-run: Ensure Bee server is running on WSL
+
+```bash
+# Check if running
+curl -sS --max-time 3 http://100.97.240.34:8082/v1/models
+
+# If not, start it (from WSL)
+~/beellama.cpp/build/bin/llama-server \
+  -m ~/models/bee-qwen36-27b/Qwen3.6-27B-Q5_K_S.gguf \
+  --mmproj ~/models/bee-qwen36-27b/mmproj-BF16.gguf \
+  --spec-draft-model ~/models/bee-qwen36-27b/dflash-draft-3.6-q4_k_m.gguf \
+  --spec-type dflash --spec-dflash-cross-ctx 1024 \
+  --port 8082 -np 1 --kv-unified -ngl all --spec-draft-ngl all \
+  -b 2048 -ub 256 --ctx-size 200000 \
+  --cache-type-k turbo4 --cache-type-v turbo3_tcq \
+  --flash-attn on --cache-ram 0 --jinja --no-mmap --mlock \
+  --reasoning on \
+  --chat-template-kwargs '{"preserve_thinking":true}' \
+  --temp 0.6 --top-k 20 --min-p 0.0
+```
+
+### Git workflow
 
 - Hermes repo is source-of-truth for edits.
 - Push to GitHub from Hermes.

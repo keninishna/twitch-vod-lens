@@ -44,8 +44,8 @@ from src.synthesis.title_dedup import finalize_stage3_candidates
 
 # ── Configuration (tweak per VOD / model) ────────────────────────────
 
-QWEN_API_URL = "http://100.97.240.34:8000/v1/chat/completions"
-QWEN_MODEL  = "Ex0bit/Qwen3.6-35B-A3B-PRISM-NVFP4"
+QWEN_API_URL = "http://100.97.240.34:8082/v1/chat/completions"
+QWEN_MODEL  = "Qwen3.6-27B-Q5_K_S.gguf"
 
 # How many clips to analyse per API call (2 clips x 3 frames ~ 6 images).
 CLIPS_PER_BATCH = 1
@@ -382,64 +382,29 @@ def run_audio_phase(clips, all_results, fusion, manifest):
             r["analysis"]["audio_extraction_time"] = raw_audio.get("extraction_time_seconds")
             r["analysis"]["audio_inference_time"] = raw_audio.get("inference_time_seconds")
             r["analysis"]["audio_structured"] = normalize_audio_result(raw_audio)
-    
-    # Step 8: Restart Qwen container
-    log("\n  Restarting Qwen 35B vLLM container...")
-    
-    # Inspect the original container to get its full run command
-    try:
-        inspect = subprocess.run(
-            ["docker", "inspect", "vllm-qwen", "--format", "{{json .Config.Cmd}}"],
-            capture_output=True, text=True, timeout=10
-        )
-        # If previous container is gone, need full docker run
-        # Use the config from the model swap script's knowledge
-    except Exception:
-        pass
-    
-    # Kill any remaining GPU processes
-    try:
-        gpu_procs = subprocess.run(
-            ["/usr/lib/wsl/lib/nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=10
-        )
-        pids = [p.strip() for p in gpu_procs.stdout.split('\n') if p.strip().isdigit()]
-        if pids:
-            subprocess.run(["kill", "-9"] + pids, capture_output=True, timeout=10)
-    except Exception:
-        pass
-    
-    time.sleep(5)
-    
-    # Start Qwen with the standard config
-    qwen_run_cmd = (
-        "docker run -d --name vllm-qwen --gpus all --restart unless-stopped --network host "
-        "-v /home/john/.cache/huggingface:/root/.cache/huggingface "
-        "-v /home/john/.cache/vllm:/root/.cache/vllm "
-        "-e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
-        "-e VLLM_USAGE_SOURCE=production-docker-image "
-        "vllm/vllm-openai:latest "
-        "--model Ex0bit/Qwen3.6-35B-A3B-PRISM-NVFP4 "
-        "--trust-remote-code --host 0.0.0.0 --port 8000 "
-        "--attention-backend flashinfer "
-        "--kv-cache-dtype fp8_e4m3 "
-        "--gpu-memory-utilization 0.93 "
-        "--max-model-len 220000 "
-        "--max-num-seqs 1 "
-        "--max-num-batched-tokens 4096 "
-        "--enable-chunked-prefill "
-        "--enable-prefix-caching "
-        "--enable-auto-tool-choice "
-        "--tool-call-parser qwen3_xml "
-        "--moe-backend flashinfer_cutlass "
-        '--speculative-config \'{"method":"mtp","num_speculative_tokens":3}\''
+    log("  Starting Bee server...")
+    # Kill any existing Bee/llama-server process
+    subprocess.run("pkill -f llama-server 2>/dev/null; sleep 2", shell=True, capture_output=True, timeout=10)
+    # Start Bee
+    bee_cmd = (
+        "nohup /home/john/beellama.cpp/build/bin/llama-server "
+        "-m /home/john/models/bee-qwen36-27b/Qwen3.6-27B-Q5_K_S.gguf "
+        "--mmproj /home/john/models/bee-qwen36-27b/mmproj-BF16.gguf "
+        "--spec-draft-model /home/john/models/bee-qwen36-27b/dflash-draft-3.6-q4_k_m.gguf "
+        "--spec-type dflash --spec-dflash-cross-ctx 1024 "
+        "--port 8082 -np 1 --kv-unified -ngl all --spec-draft-ngl all "
+        "-b 2048 -ub 256 --ctx-size 200000 "
+        "--cache-type-k turbo4 --cache-type-v turbo3_tcq "
+        "--flash-attn on --cache-ram 0 --jinja --no-mmap --mlock "
+        "--reasoning on "
+        '--chat-template-kwargs \'{"preserve_thinking":true}\' '
+        "--temp 0.6 --top-k 20 --min-p 0.0 "
+        "> /tmp/bee_server.log 2>&1 &"
     )
-    
-    log("  Starting Qwen 35B...")
-    subprocess.run(qwen_run_cmd, shell=True, capture_output=True, timeout=30)
-    
-    # Step 9: Wait for Qwen API to be ready
-    log("  Waiting for Qwen API to be ready (up to ~3 min cold start)...")
+    subprocess.run(bee_cmd, shell=True, capture_output=True, timeout=10)
+
+    # Step 9: Wait for Bee API to be ready
+    log("  Waiting for Bee API to be ready (up to ~3 min cold start)...")
     import urllib.request
     import urllib.error
     
@@ -448,7 +413,7 @@ def run_audio_phase(clips, all_results, fusion, manifest):
     while time.time() - api_wait_start < 300:
         try:
             req = urllib.request.Request(
-                "http://100.97.240.34:8000/v1/models"
+                "http://100.97.240.34:8082/v1/models"
             )
             resp = urllib.request.urlopen(req, timeout=5)
             api_ready = True
@@ -460,7 +425,7 @@ def run_audio_phase(clips, all_results, fusion, manifest):
             time.sleep(5)
     
     if api_ready:
-        log(f"  ✅ Qwen API ready after {time.time() - api_wait_start:.0f}s")
+        log(f"  ✅ Bee API ready after {time.time() - api_wait_start:.0f}s")
     else:
         log(f"  ❌ Qwen API did not become ready within timeout")
     
