@@ -1318,8 +1318,38 @@ def run():
     # Keep model ranking as reference, but enforce Stage 3 deterministic list as
     # canonical final_selected_clips for downstream extraction.
     if isinstance(final_synthesis, dict):
-        final_synthesis["model_final_selected_clips"] = final_synthesis.get("final_selected_clips", [])
+        model_clips = final_synthesis.get("final_selected_clips", [])
+        final_synthesis["model_final_selected_clips"] = model_clips
         final_synthesis["final_selected_clips"] = stage3_final_selected
+
+        # Merge Qwen's richer final-synthesis fields into the deterministic payloads.
+        # Match by `start` position (int/float), which is the most stable key across both paths.
+        qwen_by_start = {}
+        for mc in model_clips:
+            ms = mc.get("start")
+            if ms is not None:
+                qwen_by_start[ms] = mc
+
+        for clip in stage3_final_selected:
+            qc = qwen_by_start.get(clip.get("start"))
+            if not qc:
+                continue
+
+            # Qwen's platform data is more nuanced — use it when present.
+            if qc.get("platform_scores"):
+                clip["platform_scores"] = qc["platform_scores"]
+            if qc.get("platform_recommendations"):
+                clip["platform_recommendations"] = qc["platform_recommendations"]
+            if qc.get("platform_reasoning"):
+                clip["platform_reasoning"] = qc["platform_reasoning"]
+
+            # Enrich the intelligence_report with Qwen's synthesis judgment.
+            ir = clip.setdefault("intelligence_report", {})
+            if qc.get("why"):
+                ir["why_selected"] = qc["why"]
+            for field in ("strengths", "weaknesses", "narrative_quality"):
+                if qc.get(field):
+                    ir[field] = qc[field]
 
     # ── Save ──
     output = {
@@ -1346,7 +1376,7 @@ def run():
     selected = final_synthesis.get("final_selected_clips", [])
     log(f"Final selection: {len(selected)} clip(s)")
     for s in selected:
-        log(f"  Rank {s.get('rank','?')}: {s.get('start','?')}s — score={s.get('score','?')}/10 — {s.get('why','')[:100]}")
+        log(f"  Rank {s.get('rank','?')}: {s.get('start','?')}s — score={s.get('score','?')}/10 — {(s.get('intelligence_report') or {}).get('why_selected','')[:100]}")
 
     # ── Post-process: narrow clips using audio RMS energy peaks ──
     log(f"\n{'='*60}")

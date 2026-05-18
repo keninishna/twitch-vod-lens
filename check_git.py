@@ -1,4 +1,4 @@
-"""Kill old pipeline, re-pull, start fresh."""
+"""Simple git status - send return key to clear warning."""
 import sys, time
 try:
     import pexpect
@@ -14,24 +14,18 @@ child = pexpect.spawn(
 child.expect(['password:', pexpect.TIMEOUT], timeout=10)
 child.sendline('Sparky1234')
 time.sleep(2)
+# Send return to clear any warning prompt
 child.sendline('')
 child.expect('[$#>]', timeout=5)
-
-# Kill any running pipeline
-child.sendline('pkill -f "qwen_clip_analyzer" 2>&1; echo "killed"')
+child.sendline('cd ~/twitch-vod-analyzer && git log --oneline -1')
 child.expect('[$#>]', timeout=5)
+print("=== GIT ===")
+print(child.before[:800] if child.before else "")
 
-# Re-pull
-child.sendline('cd ~/twitch-vod-analyzer && git pull 2>&1')
-child.expect('[$#>]', timeout=10)
-
-# Start fresh pipeline
-child.sendline('cd ~/twitch-vod-analyzer && PYTHONPATH=. python3 -u src/synthesis/qwen_clip_analyzer_progressive.py --vod-id 2770929139 --skip-audio > /tmp/pipeline_run5.log 2>&1 &')
+child.sendline('grep "clamp" src/synthesis/scoring.py | head -3')
 child.expect('[$#>]', timeout=5)
-child.sendline('echo "PID=$!"')
-child.expect('[$#>]', timeout=5)
-print("=== STARTED ===")
-print(child.before[:500] if child.before else "")
+print("=== CLAMP CHECK ===")
+print(child.before[:800] if child.before else "")
 
 child.sendline('exit')
 child.expect(pexpect.EOF, timeout=3)
