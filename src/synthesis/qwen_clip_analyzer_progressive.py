@@ -164,7 +164,7 @@ def _as_int(value, default=0):
         return int(default)
 
 
-def qwen_call(payload, timeout=90):
+def qwen_call(payload, timeout=180):
     """POST payload to Qwen vLLM endpoint. Returns parsed JSON content."""
     import requests
     try:

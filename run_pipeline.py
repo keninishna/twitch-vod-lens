@@ -1,4 +1,4 @@
-"""SSH into WSL2, start Bee server, run pipeline."""
+"""SSH into WSL2, run the pipeline with wait_for_bee_api preflight."""
 import sys, time
 try:
     import pexpect
@@ -15,26 +15,17 @@ child.expect(['password:', pexpect.TIMEOUT], timeout=10)
 child.sendline('Sparky1234')
 child.expect(['[$#]', pexpect.TIMEOUT], timeout=10)
 
-# Check if Bee is running
-child.sendline('curl -sS --max-time 3 http://localhost:8082/v1/models 2>&1')
-child.expect(['[$#]', pexpect.TIMEOUT], timeout=8)
-bee_output = child.before or ""
-print("=== BEE CHECK ===")
-print(bee_output[:500])
+child.sendline('cd ~/twitch-vod-analyzer && git pull 2>&1')
+child.expect(['[$#]', pexpect.TIMEOUT], timeout=15)
+print("=== GIT PULL ===")
+print((child.before or "")[:1000])
 
-if "model" not in bee_output.lower():
-    print("Bee not running. Starting via toggle...")
-    child.sendline('~/bee-toggle.sh on 2>&1')
-    child.expect(['[$#]', pexpect.TIMEOUT], timeout=120)
-    print("=== BEE START ===")
-    print((child.before or "")[:2000])
-
-# Run the pipeline with skip-audio
+# Run pipeline with skip-audio and new preflight
 child.sendline('cd ~/twitch-vod-analyzer && PYTHONPATH=. python3 src/synthesis/qwen_clip_analyzer_progressive.py --vod-id 2770929139 --skip-audio 2>&1')
 child.expect(['[$#]', pexpect.TIMEOUT], timeout=600)
-print("=== PIPELINE OUTPUT (last 15000 chars) ===")
+print("=== PIPELINE OUTPUT (last 10000 chars) ===")
 out = child.before or ""
-print(out[-15000:])
+print(out[-10000:])
 print("=== END ===")
 
 child.sendline('exit')
