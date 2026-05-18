@@ -909,7 +909,7 @@ def run():
         payload = {
             "model": QWEN_MODEL,
             "messages": messages,
-            "max_tokens": 8192,
+            "max_tokens": 16384,
             "temperature": 0.15,
         }
 
@@ -1167,7 +1167,7 @@ def run():
             payload = {
                 "model": QWEN_MODEL,
                 "messages": messages,
-                "max_tokens": 8192,
+                "max_tokens": 16384,
                 "temperature": 0.15,
             }
 
