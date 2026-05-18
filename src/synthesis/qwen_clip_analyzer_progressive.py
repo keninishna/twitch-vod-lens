@@ -909,9 +909,8 @@ def run():
         payload = {
             "model": QWEN_MODEL,
             "messages": messages,
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "temperature": 0.15,
-            "response_format": {"type": "json_object"},
         }
 
         log(f"  Sending {len(user_content)-len(batch)} images to Qwen ...")
@@ -1089,7 +1088,6 @@ def run():
         }],
         "max_tokens": 16384,
         "temperature": 0.2,
-        "response_format": {"type": "json_object"},
     }
 
     t0 = time.time()
@@ -1169,9 +1167,8 @@ def run():
             payload = {
                 "model": QWEN_MODEL,
                 "messages": messages,
-                "max_tokens": 4096,
+                "max_tokens": 8192,
                 "temperature": 0.15,
-                "response_format": {"type": "json_object"},
             }
 
             t0 = time.time()
@@ -1250,7 +1247,6 @@ def run():
             }],
             "max_tokens": 16384,
             "temperature": 0.2,
-            "response_format": {"type": "json_object"},
         }
 
         t0 = time.time()
