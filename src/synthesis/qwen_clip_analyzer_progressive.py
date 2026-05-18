@@ -551,7 +551,7 @@ Analyse these specific frames and return valid JSON only:
   "trim_start_reason": "WHY this exact second is where the interesting moment begins — reference the transcript timestamp that triggers it (e.g. 'donation alert at 885s' or 'story starts at 890s')",
   "trim_end_reason": "WHY this exact second is where the moment ends — reference what finishes (e.g. 'laughing ends by 915s' or 'punchline lands at 905s')",
   "narrative_arc": "Chronological summary of what happens in this clip window: what triggers each moment (donation alert? chat message? story?), what the streamer does, and what the actual interesting moment is.",
-  "clip_point": "CLICK-WORTHY TITLE (max 12 words). Must follow PHASE 1 TITLE RESEARCH BRIEF and be evidence-grounded in trigger+payoff.",
+  "clip_point": "CLICK-WORTHY TITLE (max 12 words). Must follow PHASE 1 TITLE RESEARCH BRIEF and be evidence-grounded in trigger+payoff. Avoid duplicate words or repeated phrase structures (e.g. 'next to the X next to the Y').",
   "title_why": "1 sentence: why this title balances specificity + curiosity and remains accurate to the clip evidence.",
   "comparative_note": "How this compares to previously analysed clips in this VOD",
   "reason": "why this would (or wouldn't) make a good clip"
@@ -601,7 +601,7 @@ HIGH-SCORE GATE:
 
 TITLE RULE (Stage 1):
 - Provide clip_point for every clip.
-- clip_point must be <=12 words, evidence-grounded in trigger+payoff, and avoid dry metadata phrasing.
+- clip_point must be <=12 words, evidence-grounded in trigger+payoff, avoid dry metadata phrasing, and avoid duplicate words or repeated phrase structures.
 - For chat-read clips, keep attribution to chat while preserving hook quality.
 
 IMPORTANT: Stage 1 is discovery-only. Do not perform final title optimization or final platform recommendation decisions here.
@@ -750,7 +750,7 @@ Return valid JSON only:
       "duration_penalty_applied": "INTEGER 0..3 based on DURATION POLICY below (0 optimal, 3 worst)",
       "trim_start_reason": "Cite the exact trigger at this second.",
       "trim_end_reason": "Cite what resolves/ends at this second.",
-      "clip_point": "CLICK-WORTHY TITLE (1 sentence max). Use a proven pattern: reaction-based ('Streamer [reaction] after [trigger]'), question bait ('What happens when...?'), or short + punchy ('She had ONE job'). NO dry descriptions. For chat-read clips, keep attribution but make it hooky (e.g. 'What happens when chat drops a message about ...?').",
+      "clip_point": "CLICK-WORTHY TITLE (1 sentence max). Use a proven pattern: reaction-based ('Streamer [reaction] after [trigger]'), question bait ('What happens when...?'), or short + punchy ('She had ONE job'). NO dry descriptions. For chat-read clips, keep attribution but make it hooky (e.g. 'What happens when chat drops a message about ...?'). Avoid duplicate words or repeated phrase structures.",
     }}}}
   ],
   "overall_vod_assessment": "final summary paragraph",
@@ -762,7 +762,7 @@ IMPORTANT RULES:
 - "final_selected_clips" can be empty, 1, or many. No fixed limit on the number of clips.
 - NARRATIVE QUALITY matters more than emotional energy. Prioritize clips with stories, chat banter, or organic moments over transactional reactions.
 - DEDUP RULE: Each clip has a unique clip_id (e.g. 'Clip at 998s'). NEVER assign the same clip_point/title to two different clips. Each clip MUST have a unique title. Differentiate similar clips by focusing on what makes each moment distinct.
-- TITLE RULE: clip_point must be click-worthy (reaction, question-bait, or punchy one-liner). Keep factual attribution in analysis fields, but title must maximize curiosity. For chat-read clips, keep attribution while still hooky (e.g. 'What happens when chat drops a message about ...?'). Avoid dry forms like 'Streamer reads a chat message about ...'.
+- TITLE RULE: clip_point must be click-worthy (reaction, question-bait, or punchy one-liner). Keep factual attribution in analysis fields, but title must maximize curiosity. For chat-read clips, keep attribution while still hooky (e.g. 'What happens when chat drops a message about ...?'). Avoid dry forms like 'Streamer reads a chat message about ...' and avoid duplicate words or repeated phrase structures.
 - DEAD AIR RULE: Check for ⚠️ DEAD AIR DETECTED in the analysis log. If a single silence gap > 10 seconds exists, that clip must have a -5 penalty applied (max final score 5/10). If total silence > 30% of window, score ≤ 5. Discard clips with unacceptable dead air. Ambient atmosphere is NOT dead air — differentiate.
 - For each selected clip, provide suggested_trim_start and suggested_trim_end to capture only the relevant moment.
 - DURATION POLICY (research-guided): no minimum trim length requirement. Prefer the shortest trim that preserves setup + payoff and standalone clarity.
@@ -999,6 +999,7 @@ def run():
         discoveries,
         max_gap_seconds=20,
         max_bridge_gap_seconds=45,
+        max_cluster_size=1,  # no merging — keep clips independent
         debug_decisions=stitch_debug_decisions,
     )
     merged_pair_count = sum(1 for d in stitch_debug_decisions if d.get("merged") is True)

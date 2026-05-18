@@ -1,4 +1,4 @@
-"""Kill old pipeline, restart with unbuffered Python, monitor."""
+"""Kill old, pull new, run pipeline on WSL2."""
 import sys, time
 try:
     import pexpect
@@ -9,45 +9,28 @@ except ImportError:
 
 child = pexpect.spawn(
     'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null john@100.97.240.34',
-    timeout=600, encoding='utf-8', echo=False
+    timeout=20, encoding='utf-8', echo=False
 )
 child.expect(['password:', pexpect.TIMEOUT], timeout=10)
 child.sendline('Sparky1234')
 child.expect(['[$#]', pexpect.TIMEOUT], timeout=10)
 
-# Kill old process
-child.sendline('kill 24541 2>&1; sleep 1; ps aux | grep qwen_clip | grep -v grep')
+# Kill old pipeline processes
+child.sendline('pkill -f "qwen_clip_analyzer_progressive" 2>&1; sleep 1; echo "KILLED"')
 child.expect(['[$#]', pexpect.TIMEOUT], timeout=10)
-print("=== KILL ===")
-print((child.before or "")[:500])
+print(child.before[:500] if child.before else "")
 
-# Run with unbuffered Python, save to log
-child.sendline('cd ~/twitch-vod-analyzer && PYTHONPATH=. python3 -u src/synthesis/qwen_clip_analyzer_progressive.py --vod-id 2770929139 --skip-audio > /tmp/pipeline_run3.log 2>&1 &')
+# Pull latest
+child.sendline('cd ~/twitch-vod-analyzer && git pull 2>&1')
+child.expect(['[$#]', pexpect.TIMEOUT], timeout=15)
+print((child.before or "")[:1000])
+
+# Run pipeline with unbuffered output
+child.sendline('cd ~/twitch-vod-analyzer && PYTHONPATH=. python3 -u src/synthesis/qwen_clip_analyzer_progressive.py --vod-id 2770929139 --skip-audio > /tmp/pipeline_run4.log 2>&1 &')
 child.expect(['[$#]', pexpect.TIMEOUT], timeout=5)
-child.sendline('echo "STARTED: PID=$!"')
+child.sendline('echo "PID=$!"')
 child.expect(['[$#]', pexpect.TIMEOUT], timeout=5)
-print((child.before or "")[:500])
-
-# Wait and check progress periodically
-for check in range(6):
-    time.sleep(120)  # 2 min intervals
-    child.sendline('tail -5 /tmp/pipeline_run3.log 2>&1')
-    child.expect(['[$#]', pexpect.TIMEOUT], timeout=10)
-    output = (child.before or "")[:1000]
-    # Check if pipeline completed
-    if "Results saved" in output or "Final selection" in output:
-        print(f"=== CHECK {check+1} (COMPLETE!) ===")
-        print(output)
-        break
-    else:
-        print(f"=== CHECK {check+1} (12 min total) ===")
-        print(output)
-
-# Final tail
-child.sendline('echo "=== LOG END ===" && wc -l /tmp/pipeline_run3.log')
-child.expect(['[$#]', pexpect.TIMEOUT], timeout=10)
-print("=== FINAL ===")
-print((child.before or "")[:500])
+print("STARTED:", child.before[:500] if child.before else "")
 
 child.sendline('exit')
 child.expect(pexpect.EOF, timeout=5)
