@@ -1040,7 +1040,7 @@ def run():
             rep_analysis["suggested_trim_end"] = stitched.get("end")
         analysis_by_stitched_id[stitched_id] = rep_analysis
 
-        if scored.get("eligible_for_final") and _as_float(scored.get("final_score"), 0.0) >= 8.0:
+        if scored.get("eligible_for_final") and _as_float(scored.get("final_score"), 0.0) >= 3.0:
             for cid in source_ids:
                 eligible_source_ids.add(cid)
         else:
@@ -1060,7 +1060,7 @@ def run():
 
     log(
         f"Stage 2 scoring (audio-aware): {len(scored_candidates)} stitched candidate(s), "
-        f"{len(eligible_source_ids)} source clip(s) passed score>=8 hard gate"
+        f"{len(eligible_source_ids)} source clip(s) passed score>=3 hard gate"
     )
 
 
@@ -1209,7 +1209,7 @@ def run():
     log("PHASE 2c: FINAL SYNTHESIS ...")
 
     # Rebuild complete log with revised analyses, but only for clips that
-    # passed deterministic Stage 2 hard gate (final_score >= 8).
+    # passed deterministic Stage 2 hard gate (final_score >= 3).
     gated_results = [
         r for r in sorted(all_results, key=lambda x: x["start"])
         if ((r.get("discovery") or {}).get("candidate_id") in eligible_source_ids)
@@ -1220,13 +1220,13 @@ def run():
         final_log += build_analysis_log_entry(r) + "\n"
 
     if not gated_results:
-        log("No clips passed Stage 2 hard gate (score >= 8). Skipping final synthesis call.")
+        log("No clips passed Stage 2 hard gate (score >= 3). Skipping final synthesis call.")
         final_synthesis = {
             "final_selected_clips": [],
             "gating_summary": {
                 "stage2_scored_candidates": len(scored_candidates),
                 "eligible_source_clips": 0,
-                "hard_gate": "final_score>=8",
+                "hard_gate": "final_score>=3",
             },
         }
     else:
@@ -1259,17 +1259,17 @@ def run():
         scored_candidates=scored_candidates,
         stitched_candidates=stitched_candidates,
         analysis_by_candidate=analysis_by_stitched_id,
-        min_score=8.0,
+        min_score=3.0,
         fallback_top_n_when_empty=3,
     )
     passed_hard_gate = sum(
         1 for s in scored_candidates
-        if s.get("eligible_for_final") and _as_float(s.get("final_score"), 0.0) >= 8.0
+        if s.get("eligible_for_final") and _as_float(s.get("final_score"), 0.0) >= 3.0
     )
     fallback_mode = passed_hard_gate == 0 and bool(stage3_final_selected)
     if fallback_mode:
         log(
-            f"Stage 3 fallback activated: no clips scored >=8, selected top {len(stage3_final_selected)} clip(s) by final_score"
+            f"Stage 3 fallback activated: no clips scored >=3, selected top {len(stage3_final_selected)} clip(s) by final_score"
         )
     log(f"Stage 3 title/dedup pass selected {len(stage3_final_selected)} clip(s)")
 
@@ -1471,7 +1471,7 @@ def run():
 
         if fallback_mode:
             rescored_selected.append(s)
-        elif rescored.get("eligible_for_final") and _as_float(rescored.get("final_score"), 0.0) >= 8.0:
+        elif rescored.get("eligible_for_final") and _as_float(rescored.get("final_score"), 0.0) >= 3.0:
             rescored_selected.append(s)
         else:
             reason_codes = list(rescored.get("rejection_reasons") or [])

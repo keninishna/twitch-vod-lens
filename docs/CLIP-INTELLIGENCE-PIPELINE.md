@@ -18,16 +18,16 @@ This document is a compact operator reference for the current clip-intelligence 
 
 ```text
 Preprocessing (transcript + scenes + YOLO + chat)
-  -> Stage 1: Discovery (LLM, no final platform decisions; emits draft title fields for carryover)
+  -> Stage 1: Discovery (LLM, no final platform decisions; emits draft title fields AND failure mode IDs for carryover)
   -> Stage 1.5: Deterministic cross-window stitching
   -> Stage 1.5b: Audio normalization to structured flags
-  -> Stage 2: Deterministic scoring + penalties + hard gate
+  -> Stage 2: Deterministic scoring + penalties (duration, dead-air, clip criticism) + hard gate
   -> Stage 3: Final verification + title generation + dedup + intelligence report
   -> Post: RMS trim fallback (only unresolved full 120s windows) + mandatory rescoring
   -> Clip extraction + Nextcloud upload + public share links
 ```
 
-### Current Workstream (May 17, 2026 — BeeLlama switch)
+### Current Workstream (May 18, 2026 — Stage 2 retuned)
 
 1. **Inference backend switched to BeeLlama.cpp** (replaces vLLM)
    - Precision setup: Qwen3.6-27B-Q5_K_S target + DFlash Q4_K_M draft
@@ -37,6 +37,7 @@ Preprocessing (transcript + scenes + YOLO + chat)
    - Thinking mode enabled: `reasoning_content` and `content` fields split
    - Context size: **200K tokens** via TurboQuant (`turbo4` K, `turbo3_tcq` V)
    - Bee auto-restart integrated into audio phase (replaces docker stop/run cycle)
+   - **Max tokens bumped to 16384** for all API calls (was 4096/8192) — gives Qwen room to think before outputting JSON
 
 2. **Stage 1 title quality pass (active)**
    - Added a compact research brief to Stage 1 prompt (YouTube/NNg/curiosity-gap guidance).
@@ -54,8 +55,10 @@ Preprocessing (transcript + scenes + YOLO + chat)
 1. **Stage 1 is discovery-only**
    - No final platform posting decisions
    - Draft `clip_point` / `title_why` allowed for carryover context
-2. **Stage 2 is deterministic enforcement**
-   - Hard gate: `score >= 8` to proceed
+2. **Stage 2 is deterministic enforcement** — aggregates all scoring and penalties:
+   - Duration/dead-air penalties
+   - **Clip criticism penalty** — failure modes classified in Stage 1 are deducted from final_score (capped at -5.0)
+   - Hard gate: `score >= 3` to proceed
 3. **Stage 3 is finalization**
    - Final titles, dedup, intelligence report
 4. **Any RMS trim mutation invalidates prior score**
@@ -134,6 +137,22 @@ If RMS changes boundaries, pipeline must recompute:
 - dead-air penalties,
 - final score,
 - eligibility.
+
+### Clip Criticism Penalty (Runs Inside Stage 2)
+
+A deterministic sub-step that subtracts score based on **failure modes classified by Qwen in Stage 1**. Qwen outputs a `suggested_penalty` per failure; Stage 2 sums them with a -5.0 cap.
+
+| Failure Category | Examples | Suggested Penalty Range |
+|-----------------|----------|-----------------------|
+| **A: Structural** | No hook, dead air front, front-loaded, no climax | -2.0 to -5.0 |
+| **B: Context** | Context required, inside joke, chat-dependent | -1.5 to -5.0 |
+| **C: Pacing/Length** | Too long, pacing slow, wrong length | -1.0 to -3.0 |
+| **D: Transactional** | Transactional reaction, energy without content | -1.0 to -4.0 |
+| **E: Technical** | Audio issues, no caption compat, wrong ratio | -0.5 to -3.0 |
+
+**Total cap: -5.0.** No dedup rules in Python — Qwen judges overlap holistically. If penalty drops score below 3, clip is rejected with a `criticism_penalty` reason code.
+
+**Reference:** `docs/references/clip-failure-classification-guide.md` for full taxonomy, prompt injection patterns, and implementation spec.
 
 ---
 
@@ -296,3 +315,5 @@ cd ~/twitch-vod-analyzer && git pull
   - `references/rms-rescore-and-audio-ordering.md`
   - `references/trim-gating-and-length-policy.md`
   - `references/nextcloud-clip-upload.md`
+  - `references/viral-short-form-framework-research.md`
+  - `references/clip-failure-classification-guide.md`

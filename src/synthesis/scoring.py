@@ -189,7 +189,7 @@ def normalize_clip_analysis(
 
     eligible_for_final = (
         (not hard_reject)
-        and final_score >= 8.0
+        and final_score >= 3.0
         and trim_end > trim_start
         and start <= trim_start < trim_end <= end
     )

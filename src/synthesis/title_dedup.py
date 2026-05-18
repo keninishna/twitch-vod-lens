@@ -145,7 +145,7 @@ def finalize_stage3_candidates(
     scored_candidates: List[Dict],
     stitched_candidates: List[Dict],
     analysis_by_candidate: Dict[str, Dict],
-    min_score: float = 8.0,
+    min_score: float = 3.0,
     max_clips: int = 20,
     fallback_top_n_when_empty: int = 0,
 ) -> List[Dict]:
