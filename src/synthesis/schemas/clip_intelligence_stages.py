@@ -139,6 +139,8 @@ class ScoredCandidate(StrictModel):
     hard_gates: List[HardGateEntry]
     rejection_reasons: List[str]
     trim_source: Literal["qwen", "rms_fallback", "python_corrected"]
+    clamped_trim_start: float | None = None
+    clamped_trim_end: float | None = None
 
     @model_validator(mode="after")
     def _validate_window(self) -> "ScoredCandidate":
