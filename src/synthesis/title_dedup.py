@@ -185,8 +185,12 @@ def finalize_stage3_candidates(
         start = int(stitched.get("start", 0))
         end = int(stitched.get("end", start))
 
-        trim_start = int(float(analysis.get("suggested_trim_start", start)))
-        trim_end = int(float(analysis.get("suggested_trim_end", end)))
+        # Prefer clamped trim values from Stage 2 scoring over raw Qwen analysis
+        trim_start = scored.get("clamped_trim_start")
+        trim_end = scored.get("clamped_trim_end")
+        if trim_start is None or trim_end is None:
+            trim_start = int(float(analysis.get("suggested_trim_start", start)))
+            trim_end = int(float(analysis.get("suggested_trim_end", end)))
 
         # Final verification: trim must be valid and within candidate bounds.
         if trim_end <= trim_start:

@@ -211,6 +211,8 @@ def normalize_clip_analysis(
         "hard_gates": hard_gates,
         "rejection_reasons": rejection_reasons,
         "trim_source": trim_source,
+        "clamped_trim_start": trim_start,
+        "clamped_trim_end": trim_end,
     }
 
     validated = validate_stage_payload("scored", scored)
