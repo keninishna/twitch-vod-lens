@@ -148,12 +148,12 @@ def safe_json_parse(raw):
     # Handle doubled braces from Qwen copying template literally ({{...}} → {...})
     if content.startswith("{{"):
         inner = content[1:]  # strip one leading {
-        if inner.endswith("}}"):
-            inner = inner[:-1]  # strip one trailing }
-        try:
-            return json.loads(inner)
-        except json.JSONDecodeError:
-            pass  # fall through to normal parse
+        # Try parsing after stripping leading {, optionally also trailing }
+        for attempt in (inner, inner[:-1]):
+            try:
+                return json.loads(attempt)
+            except json.JSONDecodeError:
+                continue
     try:
         return json.loads(content)
     except json.JSONDecodeError:
