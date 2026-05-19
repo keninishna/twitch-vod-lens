@@ -145,6 +145,9 @@ def safe_json_parse(raw):
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         content = "\n".join(lines)
+    # Handle doubled braces from Qwen copying template literally ({{...}} → {...})
+    if content.startswith("{{") and content.endswith("}}"):
+        content = content[1:-1]
     try:
         return json.loads(content)
     except json.JSONDecodeError:
@@ -633,8 +636,8 @@ Return valid JSON only:
       "end": ...,
       "score": 1-10,
       "why": "why this clip is worth clipping",
-      "platform_scores": {{"tiktok": 1-10, "shorts": 1-10, "twitter": 1-10, "twitch": 1-10, "reels": 1-10}},
-      "platform_reasoning": {{"tiktok": "why", "shorts": "why", "twitter": "why", "twitch": "why", "reels": "why"}},
+"platform_scores": {"tiktok": 1-10, "shorts": 1-10, "twitter": 1-10, "twitch": 1-10, "reels": 1-10},
+      "platform_reasoning": {"tiktok": "why", "shorts": "why", "twitter": "why", "twitch": "why", "reels": "why"},
       "platform_recommendations": ["tiktok", "twitter"],
       "strengths": ["list"],
       "weaknesses": ["list"],
@@ -695,7 +698,7 @@ You requested additional frames because: {request_reason}
 Here are additional frames from this segment for a closer look:
 
 Analyse these extra frames and update your assessment. Return valid JSON only:
-{{{{
+{{
   "clip_start": {start},
   "clip_end": {end},
   "revised_clip_worthiness": 1-10,
@@ -704,11 +707,11 @@ Analyse these extra frames and update your assessment. Return valid JSON only:
   "revised_expression": "updated expression if different",
   "revised_scene_description": "updated scene description if different",
   "revised_reason": "updated reason based on additional frames",
-  "revised_platform_scores": {{"tiktok": 1-10, "shorts": 1-10, "twitter": 1-10, "twitch": 1-10, "reels": 1-10}},
+  "revised_platform_scores": {"tiktok": 1-10, "shorts": 1-10, "twitter": 1-10, "twitch": 1-10, "reels": 1-10},
   "confidence_change": "increased|decreased|unchanged",
   "final_verdict": "include|discard|need_more",
   "notes": "any additional observations from these frames"
-}}}}
+}}
 
 DURATION POLICY reminder for revised scoring:
 - No minimum trim length requirement.
@@ -728,17 +731,17 @@ Audio analysis context:
 Produce the FINAL ranked synthesis. Recommend any number of clips (0 to {total_clips}) — no fixed cap. Only include clips genuinely worth clipping.
 
 Return valid JSON only:
-{{{{
+{{
   "vod_id": "{vod_id}",
   "final_selected_clips": [
-    {{{{
+    {{
       "rank": 1,
       "start": ...,
       "end": ...,
       "score": 1-10,
       "why": "final verdict",
-      "platform_scores": {{"tiktok": 1-10, "shorts": 1-10, "twitter": 1-10, "twitch": 1-10, "reels": 1-10}},
-      "platform_reasoning": {{"tiktok": "why", "shorts": "why", "twitter": "why", "twitch": "why", "reels": "why"}},
+"platform_scores": {"tiktok": 1-10, "shorts": 1-10, "twitter": 1-10, "twitch": 1-10, "reels": 1-10},
+      "platform_reasoning": {"tiktok": "why", "shorts": "why", "twitter": "why", "twitch": "why", "reels": "why"},
       "platform_recommendations": ["tiktok", "twitter"],
       "strengths": ["list"],
       "weaknesses": ["list"],
@@ -751,12 +754,12 @@ Return valid JSON only:
       "trim_start_reason": "Cite the exact trigger at this second.",
       "trim_end_reason": "Cite what resolves/ends at this second.",
       "clip_point": "CLICK-WORTHY TITLE (1 sentence max). Use a proven pattern: reaction-based ('Streamer [reaction] after [trigger]'), question bait ('What happens when...?'), or short + punchy ('She had ONE job'). NO dry descriptions. For chat-read clips, keep attribution but make it hooky (e.g. 'What happens when chat drops a message about ...?'). Avoid duplicate words or repeated phrase structures.",
-    }}}}
+    }}
   ],
   "overall_vod_assessment": "final summary paragraph",
   "total_clips_evaluated": {total_clips},
   "clips_requesting_extra_frames": {frames_requested_count}
-}}}}
+}}
 
 IMPORTANT RULES:
 - "final_selected_clips" can be empty, 1, or many. No fixed limit on the number of clips.
