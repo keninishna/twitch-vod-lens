@@ -1,7 +1,7 @@
 # VOD Lens — Clip Intelligence Pipeline (Compressed)
 
 > **Status:** Active Development
-> **Last Updated:** May 17, 2026 (Switched from vLLM to BeeLlama.cpp for inference)
+> **Last Updated:** May 22, 2026 (Documented preprocessing pipeline + current issues)
 > **Repo:** https://github.com/keninishna/twitch-vod-lens
 
 ## Purpose
@@ -17,15 +17,39 @@ This document is a compact operator reference for the current clip-intelligence 
 ## Pipeline (Current Contract)
 
 ```text
-Preprocessing (transcript + scenes + YOLO + chat)
-  -> Stage 1: Discovery (LLM, no final platform decisions; emits draft title fields AND failure mode IDs for carryover)
-  -> Stage 1.5: Deterministic cross-window stitching
-  -> Stage 1.5b: Audio normalization to structured flags
-  -> Stage 2: Deterministic scoring + penalties (duration, dead-air, clip criticism) + hard gate
-  -> Stage 3: Final verification + title generation + dedup + intelligence report
-  -> Post: RMS trim fallback (only unresolved full 120s windows) + mandatory rescoring
-  -> Clip extraction + Nextcloud upload + public share links
+ 0: Preprocessing — download VOD (yt-dlp), transcribe (WhisperX Docker),
+    scene detect (PySceneDetect), chat download, YOLOv11 on frames,
+    fuse into unified timeline + clip candidates + clip manifest
+ 1: Stage 1 — Discovery (LLM, no final platform decisions; emits draft title fields AND failure mode IDs for carryover)
+ 1.5: Deterministic cross-window stitching
+ 1.5b: Audio normalization to structured flags
+ 2: Deterministic scoring + penalties (duration, dead-air, clip criticism) + hard gate
+ 3: Final verification + title generation + dedup + intelligence report
+ Post: RMS trim fallback (only unresolved full 120s windows) + mandatory rescoring
+ -> Clip extraction + Nextcloud upload + public share links
 ```
+
+### Preprocessing Pipeline (Step 0)
+
+Runs before the clip intelligence pipeline to generate fusion data, clip manifest, and frames.
+
+**Order:**
+1. **Download** — `yt-dlp` downloads VOD audio (MP3) + low-res video (480p MP4)
+2. **Transcribe** — `emsi/whisperx:latest` Docker container runs faster-whisper large-v3-turbo with VAD and word-level timestamps. Output: `transcript.json`
+3. **Scene detect** — `PySceneDetect` (ContentDetector) finds cut boundaries. Output: `scenes.json`
+4. **Chat** — `yt-dlp --write-chat` or TwitchDownloaderCLI downloads chat, analyzed for activity spikes. Output: `chat.json`
+5. **Fusion** — Combines transcript, scenes, chat into a unified timeline with scored moments. Output: `fusion_result.json`, `moments.json`
+6. **YOLOv11** — `ultralytics YOLO` (`yolo11x.pt`) runs on all sampled frames for object detection (person, devices, food, etc.). Output: `yolo_detections.json`
+7. **Clip candidates** — Generates 120s sliding window clips from fusion data, scored by YOLO objects + speech detection + chat intensity. Output: `clip_candidates.json`, `clip_manifest.json`
+8. **Frame extraction** — `ffmpeg` samples frames at 5s intervals from the VOD. Output: `frames/frame_*.jpg` (typically ~2500 frames for a 4h VOD)
+
+**Key Docker images on WSL2:**
+- `emsi/whisperx:latest` (15.3GB) — faster-whisper large-v3-turbo transcription
+- `vod-lens-worker:latest` (11.2GB) — custom worker for fusion/YOLO/clip processing
+- `vllm:custom` (37.5GB) — custom vLLM for Qwen2.5-Omni-7B audio analysis
+- `deepface-vod:latest` (13.1GB) — face detection (optional)
+
+**Tools available on WSL2:** ffmpeg, ffprobe, yt-dlp, Python 3.12 (no venv with preinstalled deps — runs via Docker for heavy steps)
 
 ### Current Workstream (May 18, 2026 — Stage 2 retuned)
 
@@ -158,6 +182,15 @@ A deterministic sub-step that subtracts score based on **failure modes classifie
 
 ## Implementation Map (Source of Truth)
 
+### Preprocessing pipeline
+- Orchestrator: `src/preprocessing/pipeline.py` / `src/preprocessing/__main__.py`
+- Download: `src/preprocessing/download.py` (yt-dlp), `src/preprocessing/downloader.py` (Pydantic-based)
+- Transcribe: `src/preprocessing/transcribe.py` (faster-whisper), `src/preprocessing/transcriber.py` (Pydantic-based)
+- Scene detection: `src/preprocessing/scene.py` (PySceneDetect), `src/preprocessing/scene_detector.py` (Pydantic-based)
+- Chat: `src/preprocessing/chat.py` (yt-dlp/TwitchDownloaderCLI), `src/preprocessing/chat_analyzer.py` (Pydantic-based)
+- Fusion: `src/preprocessing/fusion.py` (signal fuse), `src/preprocessing/types.py` (Pydantic schemas)
+
+### Clip intelligence pipeline
 - Main pipeline: `src/synthesis/qwen_clip_analyzer_progressive.py`
 - Stage schemas/contracts: `src/synthesis/schemas/clip_intelligence_stages.py`
 - Stage 1 discovery helpers: `src/synthesis/stage1_discovery.py`
@@ -167,6 +200,13 @@ A deterministic sub-step that subtracts score based on **failure modes classifie
 - Deterministic scoring/gates: `src/synthesis/scoring.py`
 - Title dedup/finalization: `src/synthesis/title_dedup.py`
 - Extraction/upload/share automation: `src/synthesis/extract_and_upload_clips.py`
+
+### WSL2 root-level scripts (legacy / ad-hoc)
+- YOLO detection: `yolo_detect.py` (ultralytics YOLO11x on frames)
+- Preprocess wrapper: `preprocess.py` (orchestrates download→transcribe→scene→chat→fuse)
+- Clip extraction tests: `crossref_clips*.py`, `run_live.py`, `run_final.py`, `run_bee_test.py`
+- Result inspection: `check_*.py`, `debug_*.py`, `display_titles.py`
+- Audio analysis inside Docker: `vods/audio_batch.py` (Qwen2.5-Omni-7B)
 
 ---
 
@@ -263,6 +303,20 @@ Browser-compatible extraction settings (when done manually):
 4. Integration tests may depend on optional runtime packages/environment not present in every container.
 5. **Bee service must be started before pipeline run** — no auto-start yet (manual via `~/beellama.cpp/build/bin/llama-server …`). Cold start ~60s.
 6. `response_format: json_object` not supported by llama.cpp — rely on prompt enforcement + `safe_json_parse` fallback. Verified working: clean JSON output when system prompt says "output ONLY valid JSON".
+
+### Current Issues (May 22, 2026)
+
+1. **VOD path misalignment (FIXED)** — The `__main__` block parsed `--vod-id` after module-level paths (`VOD_DIR`, `FUSION_PATH`, `OUTPUT_PATH`) were computed using the default `VOD_ID`. `--vod-id` overrode the variable but paths kept the default, causing all I/O to use the wrong VOD directory. **Fix:** Paths are now recomputed after the CLI arg override at line 1611.
+
+2. **Bee restart without --host 0.0.0.0 (FIXED)** — `run_audio_phase()` kills Bee to free GPU for the Qwen2.5-Omni-7B audio Docker container, then restarts it without `--host 0.0.0.0`. Bee binds to `127.0.0.1`, but the health check uses the Tailscale IP (`100.97.240.34:8082`), causing a 300s timeout. **Fix:** Added `--host 0.0.0.0` to both the pipeline restart command and the dev-runbook docs.
+
+3. **Preprocessing not integrated into one-command flow** — The clip intelligence pipeline (`qwen_clip_analyzer_progressive.py`) expects pre-existing `fusion_result.json`, `clip_manifest.json`, and `frames/` in `vods/phase4_<VOD_ID>/`. These must be generated separately via the preprocessing pipeline (WhisperX Docker, YOLO, ffmpeg frame extraction). No single `--vod-id X` command handles all steps end-to-end yet.
+
+4. **Audio Docker VOD ID path mismatch (FIXED)** — `run_audio_phase()` wrote `audio_batch_input.json` to `phase4_2770929139/` (hardcoded default) but the `vllm:custom` Docker container read from `phase4_2776101332/` (runtime `VOD_ID`). **Fix:** Path recomputation in #1 resolves this by ensuring both write and read paths use the same VOD ID.
+
+5. **Preprocessing deps environment not preserved** — The `vod-lens-venv` on WSL2 is empty; preprocessing steps (faster-whisper, scenedetect, torch, ultralytics) were originally run via Docker containers (`emsi/whisperx`, `vod-lens-worker`) or ad-hoc pip installs. No reproducible environment (requirements.txt, pyproject.toml) exists yet.
+
+6. **Clip extraction uses raw VOD MP4** — The clip extraction/upload step (`extract_and_upload_clips.py`) reads from `raw/<VOD_ID>.mp4`, not from the VOD directory. This path is separate from the `phase4_<VOD_ID>/` structure and may not exist for new VODs until manually downloaded.
 
 ---
 
