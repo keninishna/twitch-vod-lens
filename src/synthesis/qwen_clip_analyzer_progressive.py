@@ -1608,6 +1608,15 @@ if __name__ == "__main__":
 
     args, _ = parser.parse_known_args()
     VOD_ID = args.vod_id
+    # Recompute VOD-dependent paths now that VOD_ID is known.
+    VOD_DIR            = Path(os.environ.get("VOD_DIR",
+                             f"/home/john/twitch-vod-analyzer/vods/phase4_{VOD_ID}"))
+    FRAMES_DIR         = VOD_DIR / "frames"
+    FUSION_PATH        = VOD_DIR / f"fusion_result_{VOD_ID}.json"
+    CLIP_MANIFEST_PATH = VOD_DIR / "clip_manifest.json"
+    OUTPUT_PATH        = VOD_DIR / "qwen_vision_progressive.json"
+    VOD_MP4_PATH       = os.environ.get("VOD_MP4_PATH",
+                         f"/home/john/twitch-vod-analyzer/vods/phase4_{VOD_ID}/raw/{VOD_ID}.mp4")
     if args.skip_audio:
         ENABLE_AUDIO = False
     AUDIO_CLIPS_TO_PROCESS = args.top_clips
