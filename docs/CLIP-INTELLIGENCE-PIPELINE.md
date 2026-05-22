@@ -47,7 +47,6 @@ Runs before the clip intelligence pipeline to generate fusion data, clip manifes
 - `emsi/whisperx:latest` (15.3GB) — faster-whisper large-v3-turbo transcription
 - `vod-lens-worker:latest` (11.2GB) — custom worker for fusion/YOLO/clip processing
 - `vllm:custom` (37.5GB) — custom vLLM for Qwen2.5-Omni-7B audio analysis
-- `deepface-vod:latest` (13.1GB) — face detection (optional)
 
 **Tools available on WSL2:** ffmpeg, ffprobe, yt-dlp, Python 3.12 (no venv with preinstalled deps — runs via Docker for heavy steps)
 
