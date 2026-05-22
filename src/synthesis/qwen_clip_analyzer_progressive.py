@@ -438,7 +438,7 @@ def run_audio_phase(clips, all_results, fusion, manifest):
         "--mmproj /home/john/models/bee-qwen36-27b/mmproj-BF16.gguf "
         "--spec-draft-model /home/john/models/bee-qwen36-27b/dflash-draft-3.6-q4_k_m.gguf "
         "--spec-type dflash --spec-dflash-cross-ctx 1024 "
-        "--port 8082 -np 1 --kv-unified -ngl all --spec-draft-ngl all "
+        "--host 0.0.0.0 --port 8082 -np 1 --kv-unified -ngl all --spec-draft-ngl all "
         "-b 2048 -ub 512 --ctx-size 200000 "
         "--cache-type-k turbo4 --cache-type-v turbo3_tcq "
         "--flash-attn on --cache-ram 0 --jinja --no-mmap --mlock "
