@@ -1,7 +1,7 @@
 # VOD Lens — Clip Intelligence Pipeline (Compressed)
 
 > **Status:** Active Development
-> **Last Updated:** May 22, 2026 (Documented preprocessing pipeline + current issues)
+> **Last Updated:** May 22, 2026 (Phase4 validator/prep, scoring/prompt drift alignment, preprocessing fallback notes)
 > **Repo:** https://github.com/keninishna/twitch-vod-lens
 
 ## Purpose
@@ -96,7 +96,7 @@ Runs before the clip intelligence pipeline to generate fusion data, clip manifes
 - Dead air gaps are computed in Python from transcript timing (not left to model inference).
 - Injected warning format: `⚠️ DEAD AIR DETECTED: ...`
 - Policy:
-  - single gap `>10s` -> **-5 penalty**, cap score at **<=5**
+  - single gap `>20s` -> **-3 penalty**, cap score at **<=6**
   - total silence `>30%` -> score **<=5**
   - trims crossing dead-air regions are invalid and must be narrowed or dropped
 
@@ -173,7 +173,7 @@ A deterministic sub-step that subtracts score based on **failure modes classifie
 | **D: Transactional** | Transactional reaction, energy without content | -1.0 to -4.0 |
 | **E: Technical** | Audio issues, no caption compat, wrong ratio | -0.5 to -3.0 |
 
-**Total cap: -5.0.** No dedup rules in Python — Qwen judges overlap holistically. If penalty drops score below 3, clip is rejected with a `criticism_penalty` reason code.
+**Total cap: -5.0.** No dedup rules in Python — Qwen judges overlap holistically. If penalty drops score below 3, the clip is filtered by the Stage-2 hard gate.
 
 **Reference:** `docs/references/clip-failure-classification-guide.md` for full taxonomy, prompt injection patterns, and implementation spec.
 
@@ -197,8 +197,17 @@ A deterministic sub-step that subtracts score based on **failure modes classifie
 - Stage 1.5b audio normalization: `src/synthesis/audio_normalization.py`
 - Shared context builder (dead-air + chat-read flags): `src/synthesis/clip_context.py`
 - Deterministic scoring/gates: `src/synthesis/scoring.py`
+- Phase4 contract validator: `src/preprocessing/validate_phase4_inputs.py`
+- Phase4 preparer (download+preprocess+manifest+frames): `src/preprocessing/prepare_phase4.py`
 - Title dedup/finalization: `src/synthesis/title_dedup.py`
 - Extraction/upload/share automation: `src/synthesis/extract_and_upload_clips.py`
+
+### Verified implementation status (May 22, 2026)
+- `scoring.py` now enforces no-minimum-length duration policy (`<=60:0, 61-75:-1, 76-90:-2, >90:-3`).
+- Stage-2 deterministic clip-criticism penalty is implemented from Stage-1 `failure_modes[].suggested_penalty` with a hard cap of `5.0`.
+- Prompt JSON schemas render with single braces after `.format(...)` (double-brace template drift fixed).
+- Phase4 input validation is available as an explicit CLI gate before synthesis runs.
+- One-command phase4 preparation exists (`prepare_phase4.py`) with modern-preprocess first and legacy fallback path.
 
 ### WSL2 root-level scripts (legacy / ad-hoc)
 - YOLO detection: `yolo_detect.py` (ultralytics YOLO11x on frames)
@@ -239,6 +248,27 @@ Per selected clip (final):
 ---
 
 ## Minimal Runbook
+
+### Prepare phase4 inputs (NEW canonical pre-step)
+
+```bash
+cd ~/twitch-vod-analyzer
+PYTHONPATH=. python3 src/preprocessing/prepare_phase4.py \
+  --url https://www.twitch.tv/videos/<VOD_ID> \
+  --vod-id <VOD_ID>
+```
+
+Validate contract explicitly:
+
+```bash
+PYTHONPATH=. python3 src/preprocessing/validate_phase4_inputs.py --vod-id <VOD_ID>
+```
+
+Optional quick regression checks before long runs:
+
+```bash
+python3 -m pytest -q tests/test_scoring.py tests/test_prompt_templates.py tests/test_phase4_validation.py
+```
 
 ### Run analysis pipeline (WSL2)
 
@@ -298,7 +328,7 @@ Browser-compatible extraction settings (when done manually):
 
 1. LLM can still drift on attribution/title nuance in edge cases.
 2. Prompt constraints alone are not sufficient; deterministic post-filters are required.
-3. Full end-to-end one-command orchestration (VOD ID -> share links) is still being hardened.
+3. One-command prep exists (`prepare_phase4.py`) but still needs richer candidate generation (YOLO-aware manifest ranking and tighter production hardening).
 4. Integration tests may depend on optional runtime packages/environment not present in every container.
 5. **Bee service must be started before pipeline run** — no auto-start yet (manual via `~/beellama.cpp/build/bin/llama-server …`). Cold start ~60s.
 6. `response_format: json_object` not supported by llama.cpp — rely on prompt enforcement + `safe_json_parse` fallback. Verified working: clean JSON output when system prompt says "output ONLY valid JSON".
@@ -309,13 +339,17 @@ Browser-compatible extraction settings (when done manually):
 
 2. **Bee restart without --host 0.0.0.0 (FIXED)** — `run_audio_phase()` kills Bee to free GPU for the Qwen2.5-Omni-7B audio Docker container, then restarts it without `--host 0.0.0.0`. Bee binds to `127.0.0.1`, but the health check uses the Tailscale IP (`100.97.240.34:8082`), causing a 300s timeout. **Fix:** Added `--host 0.0.0.0` to both the pipeline restart command and the dev-runbook docs.
 
-3. **Preprocessing not integrated into one-command flow** — The clip intelligence pipeline (`qwen_clip_analyzer_progressive.py`) expects pre-existing `fusion_result.json`, `clip_manifest.json`, and `frames/` in `vods/phase4_<VOD_ID>/`. These must be generated separately via the preprocessing pipeline (WhisperX Docker, YOLO, ffmpeg frame extraction). No single `--vod-id X` command handles all steps end-to-end yet.
+3. **Phase4 prep now has a one-command path (PARTIAL FIX)** — Added `src/preprocessing/prepare_phase4.py` + `src/preprocessing/validate_phase4_inputs.py`. This now generates `fusion_result_<VOD_ID>.json`, `clip_manifest.json`, and `frames/` under `vods/phase4_<VOD_ID>/` and verifies contract integrity. Remaining limitation: manifest generation is currently deterministic window-based (no YOLO-aware ranking yet).
 
 4. **Audio Docker VOD ID path mismatch (FIXED)** — `run_audio_phase()` wrote `audio_batch_input.json` to `phase4_2770929139/` (hardcoded default) but the `vllm:custom` Docker container read from `phase4_2776101332/` (runtime `VOD_ID`). **Fix:** Path recomputation in #1 resolves this by ensuring both write and read paths use the same VOD ID.
 
 5. **Preprocessing deps environment not preserved** — The `vod-lens-venv` on WSL2 is empty; preprocessing steps (faster-whisper, scenedetect, torch, ultralytics) were originally run via Docker containers (`emsi/whisperx`, `vod-lens-worker`) or ad-hoc pip installs. No reproducible environment (requirements.txt, pyproject.toml) exists yet.
 
 6. **Clip extraction uses raw VOD MP4** — The clip extraction/upload step (`extract_and_upload_clips.py`) reads from `raw/<VOD_ID>.mp4`, not from the VOD directory. This path is separate from the `phase4_<VOD_ID>/` structure and may not exist for new VODs until manually downloaded.
+
+7. **Modern preprocessing path still has internal contract drift (PARTIAL)** — `src/preprocessing/__main__.py` now has a guarded fallback to `preprocess.py` when modern imports fail, but the modern path itself still needs cleanup (`pipeline.py` currently expects `fuse(...)` while `fusion.py` exports `fuse_signals(...)`). Treat `prepare_phase4.py` fallback behavior as expected until this is unified.
+
+8. **`prepare_phase4.py` manifest generation is deterministic baseline, not final ranking logic** — Current `clip_manifest.json` generation is window-based (speech/chat intensity) and intentionally lightweight. It satisfies pipeline contract and unblocks runs, but it is not yet YOLO-aware production ranking parity.
 
 ---
 
