@@ -1,0 +1,21 @@
+"""Pull latest, re-run pipeline, check 758s."""
+import pexpect, time
+
+p = pexpect.spawn('ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR john@100.97.240.34', timeout=900, encoding='utf-8')
+p.expect('password:', timeout=10)
+p.sendline('Sparky1234')
+time.sleep(2)
+p.sendline('')
+p.expect('[$#>]', timeout=5)
+
+p.sendline('pkill -f qwen_clip 2>/dev/null')
+p.expect('[$#>]', timeout=5)
+p.sendline('cd ~/twitch-vod-analyzer && git fetch origin && git reset --hard origin/main 2>&1')
+p.expect('[$#>]', timeout=15)
+p.sendline('rm -rf __pycache__ src/synthesis/__pycache__ src/synthesis/schemas/__pycache__ 2>/dev/null')
+p.expect('[$#>]', timeout=5)
+p.sendline('cd ~/twitch-vod-analyzer && PYTHONPATH=. python3 -u src/synthesis/qwen_clip_analyzer_progressive.py --vod-id 2770929139 --skip-audio > /tmp/pipeline_live.log 2>&1 &')
+p.expect('[$#>]', timeout=5)
+print('STARTED')
+p.sendline('exit')
+p.expect(pexpect.EOF, timeout=3)

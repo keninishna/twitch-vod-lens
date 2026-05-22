@@ -281,7 +281,7 @@ curl -sS --max-time 3 http://100.97.240.34:8082/v1/models
   --spec-draft-model ~/models/bee-qwen36-27b/dflash-draft-3.6-q4_k_m.gguf \
   --spec-type dflash --spec-dflash-cross-ctx 1024 \
   --port 8082 -np 1 --kv-unified -ngl all --spec-draft-ngl all \
-  -b 2048 -ub 256 --ctx-size 200000 \
+  -b 2048 -ub 512 --ctx-size 200000 \
   --cache-type-k turbo4 --cache-type-v turbo3_tcq \
   --flash-attn on --cache-ram 0 --jinja --no-mmap --mlock \
   --reasoning on \
