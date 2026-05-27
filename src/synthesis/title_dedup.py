@@ -141,6 +141,27 @@ def _generate_title(stitched: Dict, analysis: Dict) -> str:
     return f"The moment {trigger[:45].lower()} led to {payoff[:45].lower()}"
 
 
+def _apply_speaker_title_guard(title: str, stitched: Dict, analysis: Dict) -> str:
+    speaker = analysis.get("speaker_attribution") if isinstance(analysis, dict) else None
+    if not isinstance(speaker, dict):
+        return title
+
+    primary_identity = str(speaker.get("primary_speaker_identity") or "unknown").lower()
+    if primary_identity == "streamer":
+        return title
+
+    low = (title or "").lower()
+    if not low:
+        return title
+
+    if "streamer" in low or "she " in low or "her " in low:
+        trigger = str(stitched.get("trigger") or "a key moment")
+        payoff = str(stitched.get("payoff") or "a payoff")
+        return f"What happens when {trigger[:52].lower()} leads to {payoff[:42].lower()}?"
+
+    return title
+
+
 def finalize_stage3_candidates(
     scored_candidates: List[Dict],
     stitched_candidates: List[Dict],
@@ -199,6 +220,7 @@ def finalize_stage3_candidates(
             continue
 
         title = _generate_title(stitched, analysis)
+        title = _apply_speaker_title_guard(title, stitched, analysis)
 
         if any(is_near_duplicate_title(title, prev) for prev in seen_titles):
             continue
@@ -255,6 +277,14 @@ def finalize_stage3_candidates(
             "narrative_type": str(stitched.get("narrative_type") or "unknown"),
             "platform_scores": platform_scores,
             "platform_recommendations": platform_recommendations,
+            "speaker_attribution": {
+                "primary_speaker_identity": str(((analysis.get("speaker_attribution") or {}).get("primary_speaker_identity") or "unknown")),
+                "primary_speaker_name": (analysis.get("speaker_attribution") or {}).get("primary_speaker_name"),
+                "streamer_speaking_ratio": float(((analysis.get("speaker_attribution") or {}).get("streamer_speaking_ratio") or 0.0)),
+                "streamer_speaking_confidence": float(((analysis.get("speaker_attribution") or {}).get("streamer_speaking_confidence") or 0.0)),
+                "off_streamer_voice_detected": bool(((analysis.get("speaker_attribution") or {}).get("off_streamer_voice_detected") or False)),
+                "evidence": list(((analysis.get("speaker_attribution") or {}).get("evidence") or []))[:5],
+            },
             "intelligence_report": {
                 "why_selected": (
                     f"Deterministic score {float(scored.get('final_score', 0.0)):.1f}/10 "

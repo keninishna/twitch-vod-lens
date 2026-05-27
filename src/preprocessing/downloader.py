@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from src.models.types import VodMeta
+from src.preprocessing.types import VodMeta
 
 
 def download_vod(

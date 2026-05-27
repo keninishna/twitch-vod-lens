@@ -62,15 +62,18 @@ def test_normalize_clip_analysis_happy_path_eligible_for_final():
     assert scored["trim_source"] == "qwen"
 
 
-def test_dead_air_gap_over_10_applies_minus5_and_cap5():
+def test_dead_air_gap_over_20_applies_minus3_and_cap6():
     context = _base_context()
-    context["dead_air_gaps"] = [{"start": 130, "end": 145, "duration": 15}]
+    context["dead_air_gaps"] = [{"start": 165, "end": 190, "duration": 25}]
 
     scored = normalize_clip_analysis(_base_candidate(), _base_analysis(score=9), context)
 
     assert scored["raw_score"] == 9.0
-    assert scored["final_score"] <= 5.0
-    assert any(p["code"] == "dead_air_single_gap_gt_10" and p["points"] == 5 for p in scored["penalty_trace"])
+    assert scored["final_score"] == 6.0
+    assert any(
+        p["code"] == "dead_air_single_gap_gt_20" and p["points"] == 3
+        for p in scored["penalty_trace"]
+    )
 
 
 def test_dead_air_inside_trim_forces_reject():
@@ -128,3 +131,40 @@ def test_audio_context_adds_non_selector_penalty_signal():
 
     assert any(p["code"] == "audio_dead_air_signal" for p in scored["penalty_trace"])
     assert scored["final_score"] == 8.0
+
+
+def test_duration_policy_no_minimum_penalty_for_short_clips():
+    analysis = _base_analysis(score=8)
+    analysis["suggested_trim_start"] = 120
+    analysis["suggested_trim_end"] = 128  # 8s clip: no short-length penalty now
+
+    scored = normalize_clip_analysis(_base_candidate(), analysis, _base_context())
+
+    assert not any(p["code"] == "duration_policy_penalty" for p in scored["penalty_trace"])
+    assert scored["final_score"] == 8.0
+
+
+def test_clip_criticism_penalty_applies_from_failure_modes():
+    analysis = _base_analysis(score=9)
+    analysis["failure_modes"] = [
+        {"id": "D1", "suggested_penalty": -1.0},
+        {"id": "B2", "suggested_penalty": -2.5},
+    ]
+
+    scored = normalize_clip_analysis(_base_candidate(), analysis, _base_context())
+
+    assert any(p["code"] == "clip_criticism_penalty" and p["points"] == 3.5 for p in scored["penalty_trace"])
+    assert scored["final_score"] == 5.5
+
+
+def test_clip_criticism_penalty_is_capped_at_5():
+    analysis = _base_analysis(score=9)
+    analysis["failure_modes"] = [
+        {"id": "A1", "suggested_penalty": -4.0},
+        {"id": "B1", "suggested_penalty": -3.0},
+    ]
+
+    scored = normalize_clip_analysis(_base_candidate(), analysis, _base_context())
+
+    assert any(p["code"] == "clip_criticism_penalty" and p["points"] == 5.0 for p in scored["penalty_trace"])
+    assert scored["final_score"] == 4.0

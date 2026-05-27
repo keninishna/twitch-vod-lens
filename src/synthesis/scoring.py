@@ -29,16 +29,19 @@ def _as_int(value, default=0) -> int:
 
 
 def _duration_penalty(trim_start: int, trim_end: int) -> Tuple[int, int]:
-    """Return (penalty_points, duration_seconds)."""
+    """Return (penalty_points, duration_seconds).
+
+    Policy: no minimum clip length penalty; only longer clips are penalized.
+    """
     if trim_end <= trim_start:
         return 3, 0
 
     dur = trim_end - trim_start
-    if 25 <= dur <= 60:
+    if dur <= 60:
         return 0, dur
-    if 20 <= dur <= 24 or 61 <= dur <= 75:
+    if dur <= 75:
         return 1, dur
-    if 15 <= dur <= 19 or 76 <= dur <= 90:
+    if dur <= 90:
         return 2, dur
     return 3, dur
 
@@ -53,6 +56,31 @@ def _dead_air_inside_trim(dead_air_gaps: List[Dict], trim_start: int, trim_end: 
         if gs < trim_end and ge > trim_start:
             return True
     return False
+
+
+def _clip_criticism_penalty(analysis: Dict) -> float:
+    """Sum model-suggested failure penalties with deterministic cap.
+
+    Accepts either negative or positive suggested_penalty values.
+    Missing/invalid entries are ignored.
+    """
+    failure_modes = analysis.get("failure_modes") or []
+    if not isinstance(failure_modes, list):
+        return 0.0
+
+    total = 0.0
+    for fm in failure_modes:
+        if not isinstance(fm, dict):
+            continue
+        val = fm.get("suggested_penalty")
+        if val is None:
+            continue
+        penalty = abs(_as_float(val, 0.0))
+        if penalty <= 0:
+            continue
+        total += penalty
+
+    return min(5.0, round(total, 4))
 
 
 def normalize_clip_analysis(
@@ -175,6 +203,11 @@ def normalize_clip_analysis(
     duration_penalty, _dur = _duration_penalty(trim_start, trim_end)
     if duration_penalty > 0:
         add_penalty("duration_policy_penalty", duration_penalty)
+
+    # Clip criticism penalty from Stage 1 failure_modes (capped at 5.0)
+    criticism_penalty = _clip_criticism_penalty(analysis)
+    if criticism_penalty > 0:
+        add_penalty("clip_criticism_penalty", criticism_penalty)
 
     # Audio context integration (context signal, not direct selector).
     if bool(audio.get("dead_air_detected")):

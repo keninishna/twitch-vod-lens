@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 from collections import Counter
 
-from src.models.types import ChatMessage, ChatActivity, ChatAnalysis
+from src.preprocessing.types import ChatMessage, ChatActivity, ChatAnalysis
 
 
 WINDOW_SIZE = 30  # seconds per activity window

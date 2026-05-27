@@ -9,3 +9,8 @@ __pycache__/
 *.jpg
 .DS_Store
 .env
+data/speaker_profiles/*.json
+data/speaker_profiles/*.wav
+data/streamer_intelligence/*/voice_profiles/*.json
+data/streamer_intelligence/*/voice_profiles/*.wav
+pretrained_models/

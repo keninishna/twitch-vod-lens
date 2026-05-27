@@ -10,7 +10,9 @@ via WebDAV, and creates public share links via the OCS API.
 
 Usage:
     python extract_and_upload_clips.py --json path/to/qwen_vision_progressive.json \
-        --vod path/to/raw_vod.mp4 --min-score 7 --output-dir ./clips
+        [--vod path/to/raw_vod.mp4] --min-score 7 --output-dir ./clips
+
+If --vod is omitted, the script auto-detects the raw MP4 from common phase4 paths.
 
 Environment:
     NEXTCLOUD_USER       (default: john)
@@ -61,6 +63,60 @@ def filter_clips(data: dict, min_score: int) -> list[dict]:
     """Return final_selected_clips with score >= min_score."""
     clips = data.get("final_ranking", {}).get("final_selected_clips", [])
     return [c for c in clips if c.get("score", 0) >= min_score]
+
+
+def _extract_vod_id(data: dict, json_path: Path) -> str | None:
+    """Best-effort VOD ID extraction from output JSON/path."""
+    v = data.get("vod_id")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+
+    # phase4_<VOD_ID> directory naming
+    parent = json_path.parent.name
+    if parent.startswith("phase4_") and len(parent) > len("phase4_"):
+        return parent[len("phase4_"):]
+
+    # fallback: find first 8+ digit token in filename/path
+    m = re.search(r"(\d{8,})", str(json_path))
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def resolve_vod_path(explicit_vod: str | None, data: dict, json_path: Path) -> Path:
+    """Resolve raw MP4 path from explicit arg or common phase4 layouts."""
+    if explicit_vod:
+        return Path(explicit_vod).expanduser().resolve()
+
+    vod_id = _extract_vod_id(data, json_path)
+    candidates: list[Path] = []
+
+    # Relative to output JSON location
+    if vod_id:
+        candidates.extend([
+            json_path.parent / "raw" / f"{vod_id}.mp4",
+            json_path.parent / f"{vod_id}.mp4",
+            json_path.parent.parent / "raw" / f"{vod_id}.mp4",
+            Path.cwd() / "raw" / f"{vod_id}.mp4",
+        ])
+
+    # Generic fallback if JSON sits inside phase4_* tree
+    candidates.extend([
+        json_path.parent / "raw" / "vod.mp4",
+        json_path.parent.parent / "raw" / "vod.mp4",
+    ])
+
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+
+    searched = "\n".join(f"  - {p}" for p in candidates)
+    raise FileNotFoundError(
+        "Could not auto-detect raw VOD mp4. "
+        "Pass --vod explicitly.\nSearched:\n"
+        f"{searched}"
+    )
 
 
 def extract_clip(
@@ -158,8 +214,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--vod",
-        required=True,
-        help="Path to raw VOD mp4",
+        help="Path to raw VOD mp4 (optional; auto-detected if omitted)",
     )
     parser.add_argument(
         "--min-score",
@@ -179,19 +234,27 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    vod_path = Path(args.vod).resolve()
     json_path = Path(args.json).resolve()
     out_dir = Path(args.output_dir)
 
-    if not vod_path.exists():
-        print(f"Error: VOD not found: {vod_path}", file=sys.stderr)
-        sys.exit(1)
     if not json_path.exists():
         print(f"Error: JSON not found: {json_path}", file=sys.stderr)
         sys.exit(1)
 
     log(f"Loading pipeline output: {json_path}")
     data = load_pipeline_json(str(json_path))
+
+    try:
+        vod_path = resolve_vod_path(args.vod, data, json_path)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not vod_path.exists():
+        print(f"Error: VOD not found: {vod_path}", file=sys.stderr)
+        sys.exit(1)
+
+    log(f"Using VOD file: {vod_path}")
 
     clips = filter_clips(data, args.min_score)
     if not clips:

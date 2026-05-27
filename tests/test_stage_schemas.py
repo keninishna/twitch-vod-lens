@@ -110,6 +110,14 @@ def test_final_selected_clip_requires_intelligence_report_shape():
             "reels": 7,
         },
         "platform_recommendations": ["twitter", "twitch"],
+        "speaker_attribution": {
+            "primary_speaker_identity": "streamer",
+            "primary_speaker_name": "Skitch",
+            "streamer_speaking_ratio": 0.31,
+            "streamer_speaking_confidence": 0.89,
+            "off_streamer_voice_detected": True,
+            "evidence": ["SPEAKER_00 matched streamer profile sim=0.84"],
+        },
         "intelligence_report": {
             "why_selected": "Clear setup and payoff with self-contained context",
             "narrative_arc": "chat setup -> streamer confusion -> realization",
@@ -125,6 +133,8 @@ def test_final_selected_clip_requires_intelligence_report_shape():
     model = validate_stage_payload("final_selected", payload)
     assert isinstance(model, FinalSelectedClip)
     assert model.intelligence_report.why_selected.startswith("Clear setup")
+    assert model.speaker_attribution is not None
+    assert model.speaker_attribution.primary_speaker_identity == "streamer"
 
 
 def test_unknown_stage_raises_contract_error():

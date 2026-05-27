@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from src.models.types import SceneBoundary, SceneClip
+from src.preprocessing.types import SceneBoundary, SceneClip
 
 
 def detect_scenes(

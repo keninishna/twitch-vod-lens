@@ -32,6 +32,18 @@ import time
 import argparse
 from pathlib import Path
 
+from src.intelligence.profile_context import render_streamer_profile_context
+from src.intelligence.profile_update import (
+    apply_profile_update_auto,
+    build_profile_update_proposal,
+    partition_observations_for_merge,
+)
+from src.intelligence.streamer_store import (
+    append_observations,
+    load_streamer_profile,
+    resolve_streamer_id_context,
+    save_streamer_profile,
+)
 from src.synthesis.audio_normalization import normalize_audio_result
 from src.synthesis.clip_context import build_clip_context, render_prompt_context
 from src.synthesis.scoring import normalize_clip_analysis
@@ -114,6 +126,22 @@ FRAME_INTERVAL_S   = 5       # frames were sampled at this interval
 
 VOD_MP4_PATH       = os.environ.get("VOD_MP4_PATH",
     f"/home/john/twitch-vod-analyzer/vods/phase4_{VOD_ID}/raw/{VOD_ID}.mp4")
+
+ENABLE_PERSISTENT_INTELLIGENCE = os.environ.get("ENABLE_PERSISTENT_INTELLIGENCE", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+STREAMER_ID_OVERRIDE = os.environ.get("STREAMER_ID")
+STREAMER_PROFILE_ROOT = Path(os.environ.get("STREAMER_PROFILE_ROOT", "data/streamer_intelligence"))
+UPDATE_STREAMER_PROFILE = os.environ.get("UPDATE_STREAMER_PROFILE", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+PROFILE_UPDATE_MODE = os.environ.get("PROFILE_UPDATE_MODE", "propose")
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -271,7 +299,7 @@ def sample_extra_frames(clip, count=8):
 
 # ── Audio Analysis Phase ──────────────────────────────────────────
 
-def run_audio_phase(clips, all_results, fusion, manifest):
+def run_audio_phase(clips, all_results, fusion, manifest, speaker_attribution=None):
     """
     Phase 1.5: Audio analysis via Qwen2.5-Omni-7B.
     
@@ -359,6 +387,7 @@ def run_audio_phase(clips, all_results, fusion, manifest):
             transcript_segments=transcript_segments,
             chat_messages=chat_messages,
             window=window,
+            speaker_attribution=speaker_attribution,
         )
         txt, _chat_text = render_prompt_context(context, transcript_char_limit=2000)
         chat_count = len(context.get("chat_messages", []))
@@ -530,13 +559,22 @@ IMPORTANT CONTEXT FOR UNDERSTANDING THE STREAM:
 - A clip where the streamer explains an inside joke to a new viewer IS a story arc with setup and payoff. HIGH clip value.
 - A clip where the streamer just reacts to an alert without explanation is a transactional reaction. LOW clip value.
 
+{streamer_profile_context}
+
 PHASE 1 TITLE RESEARCH BRIEF:
 {phase1_title_research_summary}
+
+SPEAKER-FRAMING INFERENCE RULES:
+- Use speaker attribution evidence in the transcript context (if present) to infer who is actually speaking.
+- If a draft title frames this as a streamer reaction but the streamer is not the primary speaker, reframe to the real speaker/situation.
+- If streamer absence weakens standalone narrative value, lower clip_worthiness accordingly and explain attribution risk.
+- Guest-led clips may still be strong if attribution is accurate and payoff is clear.
+- Do NOT assume deterministic speaker penalties/hard gates exist in Python. Handle this by inference/reframing in your analysis.
 
 {phase1_title_examples}
 
 Analyse these specific frames and return valid JSON only:
-{{{{
+{{
   "clip_start": {start},
   "clip_end": {end},
   "person_visible": true/false,
@@ -560,11 +598,27 @@ Analyse these specific frames and return valid JSON only:
   "trim_start_reason": "WHY this exact second is where the interesting moment begins — reference the transcript timestamp that triggers it (e.g. 'donation alert at 885s' or 'story starts at 890s')",
   "trim_end_reason": "WHY this exact second is where the moment ends — reference what finishes (e.g. 'laughing ends by 915s' or 'punchline lands at 905s')",
   "narrative_arc": "Chronological summary of what happens in this clip window: what triggers each moment (donation alert? chat message? story?), what the streamer does, and what the actual interesting moment is.",
+  "failure_modes": [
+    {{
+      "id": "A1|B2|C3|D1|E2",
+      "category": "A|B|C|D|E",
+      "reason": "short reason this failure applies",
+      "suggested_penalty": "-0.5 to -5.0"
+    }}
+  ],
   "clip_point": "CLICK-WORTHY TITLE (max 12 words). Must follow PHASE 1 TITLE RESEARCH BRIEF and be evidence-grounded in trigger+payoff. Avoid duplicate words or repeated phrase structures (e.g. 'next to the X next to the Y').",
   "title_why": "1 sentence: why this title balances specificity + curiosity and remains accurate to the clip evidence.",
+  "speaker_framing_assessment": {{
+    "primary_speaker_identity": "streamer|guest|chat|unknown|mixed",
+    "is_framed_as_streamer_reaction": true/false,
+    "streamer_actually_speaking": true/false,
+    "attribution_risk": "none|low|medium|high",
+    "recommended_title_framing": "How title should be framed",
+    "evidence": ["speaker evidence lines"]
+  }},
   "comparative_note": "How this compares to previously analysed clips in this VOD",
   "reason": "why this would (or wouldn't) make a good clip"
-}}}}
+}}
 
 NARRATIVE CATEGORIES (use these to classify):
 - storytelling: Story with beginning/middle/end or joke with setup+punchline. HIGHEST clip value.
@@ -576,7 +630,7 @@ NARRATIVE CATEGORIES (use these to classify):
 
 KEY RULES:
 - A donation alert laugh may have high emotional energy but LOW clip value because the humor is the donors
-- DEAD AIR RULE: Check the transcript timestamps and the ⚠️ DEAD AIR DETECTED warning above. If the ⚠️ DEAD AIR DETECTED warning shows a single silence gap > 10 seconds, that's a DEAD AIR CLIP — clip_worthiness MUST get a -5 PENALTY (max score 5/10). Example: if it would score 8, score becomes 3. If it would score 7, score becomes 2. A clip with 10+ seconds of dead silence is useless for content.
+- DEAD AIR RULE: Check the transcript timestamps and the ⚠️ DEAD AIR DETECTED warning above. If the warning shows a single silence gap > 20 seconds, apply a -3 penalty and cap clip_worthiness at 6/10. If total silence > 30% of the window, cap score at 5/10.
 - TRIM MUST EXCLUDE DEAD AIR: If dead air gaps exist INSIDE your suggested_trim_start→suggested_trim_end range, your trim is wrong. Either (a) narrow the trim to cut around the gaps so no dead air remains in the clip, or (b) if the interesting content spans both sides of a dead air gap with no clean narrow, discard the clip (score ≤ 3). A clean clip has continuous speech/vocalization from trim_start to trim_end.
 - SILENCE ≠ AMBIENT: Ambient (low-fi music, rain sounds) is a deliberate atmosphere choice. Dead air is silence with nothing happening — the streamer stopped talking, there's no music, no content. Differentiate these.
 - DURATION POLICY (research-guided):
@@ -613,6 +667,11 @@ TITLE RULE (Stage 1):
 - clip_point must be <=12 words, evidence-grounded in trigger+payoff, avoid dry metadata phrasing, and avoid duplicate words or repeated phrase structures.
 - For chat-read clips, keep attribution to chat while preserving hook quality.
 
+CLIP CRITICISM RULE (Stage 1):
+- Populate failure_modes with any applicable structural/context/pacing/transactional/technical failures.
+- Each failure should include suggested_penalty and concise reason.
+- Use failure_modes conservatively; Stage 2 applies deterministic penalty cap.
+
 IMPORTANT: Stage 1 is discovery-only. Do not perform final title optimization or final platform recommendation decisions here.
 
 Focus on narrative discovery quality and trim precision in this stage.
@@ -633,10 +692,10 @@ Now produce a provisional ranked synthesis. You may recommend ANY number of clip
 IMPORTANT: If you need additional visual information to make a confident decision about a specific clip (e.g. you want to see more frames to confirm an expression, verify scene context, or check visual quality), specify those clip start times in "need_more_frames" and explain why in "frame_requests". Additional frames will be sampled and shown to you in a follow-up.
 
 Return valid JSON only:
-{{{{
+{{
   "vod_id": "{vod_id}",
   "selected_clips": [
-    {{{{
+    {{
       "rank": 1,
       "start": ...,
       "end": ...,
@@ -655,19 +714,19 @@ Return valid JSON only:
       "duration_penalty_applied": "INTEGER 0..3 based on DURATION POLICY below (0 optimal, 3 worst)",
       "trim_start_reason": "Cite the exact trigger at this second (e.g. 'donation alert read at 885s', 'chat message appears at 120s', 'streamer starts story at 890s')",
       "trim_end_reason": "Cite what resolves/ends at this second (e.g. 'story payoff lands at 905s', 'laughing dies down by 915s', 'donation reaction ends at 770s')"
-    }}}}
+    }}
   ],
   "need_more_frames": [/* array of clip start times needing more frames, or empty [] */],
   "frame_requests": [
-    {{{{
+    {{
       "clip_start": 123,
       "reason": "why I need more frames (e.g. 'uncertain about expression', 'want to verify energy level')",
       "preferred_timestamps": [124, 125, 126]
-    }}}}
+    }}
   ],
   "overall_vod_assessment": "summary paragraph",
   "total_clips_evaluated": {total_clips}
-}}}}
+}}
 
 IMPORTANT RULES:
 - "selected_clips" can be empty (no good clips), have 1 clip, or have 10+ clips. No fixed cap.
@@ -675,7 +734,7 @@ IMPORTANT RULES:
 - "frame_requests" should be an empty array [] if no additional frames needed.
 - If you do request frames, keep it to at most 3 clips that you're most uncertain about.
 - NARRATIVE QUALITY matters more than emotional energy. A transactional reaction (donation/sub alert) is LOW value. A story or chat banter is HIGH value.
-- DEAD AIR RULE: Check the ⚠️ DEAD AIR DETECTED warnings in the analysis log. If a clip has a single silence gap > 10 seconds, apply a -5 penalty to its score (max final score 5/10). If total silence > 30% of window, score ≤ 5. Discard clips with too much dead air.
+- DEAD AIR RULE: Check the ⚠️ DEAD AIR DETECTED warnings in the analysis log. If a clip has a single silence gap > 20 seconds, apply a -3 penalty and cap score at 6/10. If total silence > 30% of window, score ≤ 5. Discard clips with too much dead air.
 - DEDUP RULE: Each clip has a unique clip_id (e.g. 'Clip at 998s'). NEVER assign the same clip_point/title to two different clips. If two clips have similar content, differentiate their titles. When in doubt, reference the clip_id as an anchor.
 - TITLE RULE: Each clip's clip_point MUST be click-worthy and curiosity-inducing. Do NOT use dry descriptions. For chat-read clips, preserve attribution but use hooky phrasing (e.g. 'What happens when chat drops a message about ...?'). Avoid bland forms like 'Streamer reads a chat message about ...'.
 - PLATFORM RULE: For each clip, provide platform_recommendations — an explicit list of which platforms to actually post to. Only include platforms where the clip genuinely fits (score >= 6). Can recommend multiple platforms. Empty list if none.
@@ -772,7 +831,9 @@ IMPORTANT RULES:
 - NARRATIVE QUALITY matters more than emotional energy. Prioritize clips with stories, chat banter, or organic moments over transactional reactions.
 - DEDUP RULE: Each clip has a unique clip_id (e.g. 'Clip at 998s'). NEVER assign the same clip_point/title to two different clips. Each clip MUST have a unique title. Differentiate similar clips by focusing on what makes each moment distinct.
 - TITLE RULE: clip_point must be click-worthy (reaction, question-bait, or punchy one-liner). Keep factual attribution in analysis fields, but title must maximize curiosity. For chat-read clips, keep attribution while still hooky (e.g. 'What happens when chat drops a message about ...?'). Avoid dry forms like 'Streamer reads a chat message about ...' and avoid duplicate words or repeated phrase structures.
-- DEAD AIR RULE: Check for ⚠️ DEAD AIR DETECTED in the analysis log. If a single silence gap > 10 seconds exists, that clip must have a -5 penalty applied (max final score 5/10). If total silence > 30% of window, score ≤ 5. Discard clips with unacceptable dead air. Ambient atmosphere is NOT dead air — differentiate.
+- SPEAKER-FRAMING RULE: infer whether streamer is actually speaking from speaker-attribution context in the analysis log. If primary voice is guest/non-streamer, do not frame title as streamer reaction unless streamer speech is the payoff. Guest-led clips can still be selected when accurately attributed.
+- SPEAKER POLICY: do not assume deterministic speaker-specific penalties/gates in Python; handle this through title/report inference and attribution-risk reasoning.
+- DEAD AIR RULE: Check for ⚠️ DEAD AIR DETECTED in the analysis log. If a single silence gap > 20 seconds exists, that clip must take a -3 penalty with a cap at 6/10. If total silence > 30% of window, score ≤ 5. Discard clips with unacceptable dead air. Ambient atmosphere is NOT dead air — differentiate.
 - For each selected clip, provide suggested_trim_start and suggested_trim_end to capture only the relevant moment.
 - DURATION POLICY (research-guided): no minimum trim length requirement. Prefer the shortest trim that preserves setup + payoff and standalone clarity.
 - DURATION PENALTY: apply to final score and report duration_penalty_applied + trim_duration_seconds:
@@ -889,12 +950,55 @@ def run():
 
     fusion = load_json(FUSION_PATH)
     manifest = load_json(CLIP_MANIFEST_PATH)
+
+    speaker_attribution = None
+    speaker_path = VOD_DIR / f"speaker_attribution_{VOD_ID}.json"
+    if speaker_path.exists():
+        try:
+            speaker_attribution = load_json(speaker_path)
+            seg_count = len((speaker_attribution or {}).get("segments", []) or [])
+            log(f"Loaded speaker attribution: {speaker_path} (segments={seg_count})")
+        except Exception as e:
+            log(f"WARN: failed to load speaker attribution ({speaker_path}): {e}")
+            speaker_attribution = None
+
     clips = manifest.get("clips", [])
     if not clips:
         log("ERROR: No clips in manifest.")
         sys.exit(1)
 
     clips.sort(key=lambda c: c["start"])
+
+    streamer_profile_context = (
+        "STREAMER PROFILE CONTEXT (evidence-backed, advisory): unavailable for this run."
+    )
+    vod_meta = fusion.get("vod_meta") if isinstance(fusion, dict) else {}
+    streamer_identity = resolve_streamer_id_context(vod_meta or {}, STREAMER_ID_OVERRIDE)
+    streamer_id_for_run = streamer_identity["streamer_id"]
+    streamer_profile = None
+
+    log(
+        "Resolved streamer_id for run: "
+        f"{streamer_id_for_run} (source={streamer_identity['source']}, "
+        f"metadata={streamer_identity['metadata_streamer_id']}, "
+        f"override={streamer_identity['override_streamer_id']})"
+    )
+    if streamer_identity.get("warning"):
+        log(f"WARN: {streamer_identity['warning']}")
+
+    if ENABLE_PERSISTENT_INTELLIGENCE:
+        try:
+            streamer_profile = load_streamer_profile(
+                streamer_id=streamer_id_for_run,
+                root=STREAMER_PROFILE_ROOT,
+            )
+            streamer_profile_context = render_streamer_profile_context(streamer_profile, max_chars=2000)
+            log(
+                f"Loaded persistent streamer profile context for '{streamer_id_for_run}' "
+                f"from {STREAMER_PROFILE_ROOT}"
+            )
+        except Exception as e:
+            log(f"WARN: failed to load persistent streamer profile context: {e}")
 
     # Build enrichment lookup from fusion data
     transcript_segments = fusion.get("transcript", {}).get("segments", [])
@@ -907,6 +1011,7 @@ def run():
             transcript_segments=transcript_segments,
             chat_messages=chat_messages,
             window=window,
+            speaker_attribution=speaker_attribution,
         )
         return render_prompt_context(context, transcript_char_limit=2000)
 
@@ -939,6 +1044,7 @@ def run():
                 chat_messages=chat_act,
                 yolo_objects=", ".join(yolo_objs) if yolo_objs else "none",
                 batch_context=batch_context,
+                streamer_profile_context=streamer_profile_context,
                 phase1_title_research_summary=PHASE1_TITLE_RESEARCH_SUMMARY,
                 phase1_title_examples=PHASE1_TITLE_EXAMPLES,
                 platform_guide=PLATFORM_SCORING_GUIDE,
@@ -1026,7 +1132,13 @@ def run():
     analysis_by_stitched_id = {}
 
     # ── Phase 1.5: Audio Analysis (model swap → Omni → audio → restart Qwen) ──
-    all_results = run_audio_phase(clips, all_results, fusion, manifest)
+    all_results = run_audio_phase(
+        clips,
+        all_results,
+        fusion,
+        manifest,
+        speaker_attribution=speaker_attribution,
+    )
 
     # Build audio context for synthesis prompts
     audio_context = ""
@@ -1074,6 +1186,7 @@ def run():
             transcript_segments=transcript_segments,
             chat_messages=chat_messages,
             window=context_window,
+            speaker_attribution=speaker_attribution,
         )
 
         scored = normalize_clip_analysis(
@@ -1089,6 +1202,16 @@ def run():
             rep_analysis["suggested_trim_start"] = stitched.get("start")
         if rep_analysis.get("suggested_trim_end") is None:
             rep_analysis["suggested_trim_end"] = stitched.get("end")
+
+        rep_analysis["speaker_attribution"] = {
+            "primary_speaker_identity": stitched_context.get("primary_speaker_identity") or "unknown",
+            "primary_speaker_name": stitched_context.get("primary_speaker_name"),
+            "streamer_speaking_ratio": stitched_context.get("streamer_speaking_ratio", 0.0),
+            "streamer_speaking_confidence": stitched_context.get("streamer_speaking_confidence", 0.0),
+            "off_streamer_voice_detected": stitched_context.get("off_streamer_voice_detected", False),
+            "evidence": list(stitched_context.get("speaker_name_evidence") or []),
+        }
+
         analysis_by_stitched_id[stitched_id] = rep_analysis
 
         if scored.get("eligible_for_final") and _as_float(scored.get("final_score"), 0.0) >= 3.0:
@@ -1378,6 +1501,7 @@ def run():
     output = {
         "vod_id": VOD_ID,
         "pipeline": "progressive-chunking-v2",
+        "streamer_identity": streamer_identity,
         "batches_processed": len(batches),
         "clips_analyzed": len(all_results),
         "clips_with_extra_frames": frames_served,
@@ -1549,6 +1673,7 @@ def run():
             transcript_segments=transcript_segments,
             chat_messages=chat_messages,
             window=context_window,
+            speaker_attribution=speaker_attribution,
         )
 
         rescored = normalize_clip_analysis(
@@ -1598,6 +1723,82 @@ def run():
         json.dump(output, f, indent=2)
     log(f"Updated results saved to {OUTPUT_PATH}")
 
+    if ENABLE_PERSISTENT_INTELLIGENCE and UPDATE_STREAMER_PROFILE and PROFILE_UPDATE_MODE != "off":
+        try:
+            if streamer_profile is None:
+                streamer_profile = load_streamer_profile(
+                    streamer_id=streamer_id_for_run,
+                    root=STREAMER_PROFILE_ROOT,
+                )
+
+            proposal = build_profile_update_proposal(
+                vod_id=VOD_ID,
+                streamer_id=streamer_id_for_run,
+                final_selected_clips=selected,
+                mode=PROFILE_UPDATE_MODE,
+                streamer_id_source=streamer_identity.get("source", "fallback"),
+                metadata_streamer_id=streamer_identity.get("metadata_streamer_id"),
+                override_streamer_id=streamer_identity.get("override_streamer_id"),
+                mismatch_warning=streamer_identity.get("warning"),
+            )
+            proposal_path = OUTPUT_PATH.parent / f"profile_update_proposal_{VOD_ID}.json"
+            with proposal_path.open("w", encoding="utf-8") as f:
+                json.dump(proposal.model_dump(mode="json"), f, indent=2)
+
+            output["profile_update"] = {
+                "enabled": True,
+                "mode": PROFILE_UPDATE_MODE,
+                "streamer_id": streamer_id_for_run,
+                "streamer_id_source": streamer_identity.get("source", "fallback"),
+                "metadata_streamer_id": streamer_identity.get("metadata_streamer_id"),
+                "override_streamer_id": streamer_identity.get("override_streamer_id"),
+                "mismatch_warning": streamer_identity.get("warning"),
+                "proposal_path": str(proposal_path),
+                "candidate_observations": len(proposal.candidate_observations),
+            }
+
+            if PROFILE_UPDATE_MODE == "auto":
+                updated_profile, accepted, queued, rejected = apply_profile_update_auto(
+                    streamer_profile,
+                    proposal,
+                )
+                if accepted:
+                    append_observations(streamer_id_for_run, accepted, STREAMER_PROFILE_ROOT)
+                save_streamer_profile(updated_profile, STREAMER_PROFILE_ROOT)
+                output["profile_update"].update(
+                    {
+                        "accepted": len(accepted),
+                        "queued": len(queued),
+                        "rejected": len(rejected),
+                    }
+                )
+                log(
+                    "Persistent profile auto-update: "
+                    f"accepted={len(accepted)} queued={len(queued)} rejected={len(rejected)}"
+                )
+            else:
+                accepted, queued, rejected = partition_observations_for_merge(
+                    proposal.candidate_observations
+                )
+                output["profile_update"].update(
+                    {
+                        "accepted_if_auto": len(accepted),
+                        "queued_if_manual": len(queued),
+                        "rejected_if_auto": len(rejected),
+                    }
+                )
+                log(
+                    "Persistent profile proposal generated "
+                    f"(accepted_if_auto={len(accepted)}, queued_if_manual={len(queued)}, rejected_if_auto={len(rejected)}): "
+                    f"{proposal_path}"
+                )
+
+            with open(OUTPUT_PATH, "w") as f:
+                json.dump(output, f, indent=2)
+            log(f"Updated results saved with profile-update metadata: {OUTPUT_PATH}")
+        except Exception as e:
+            log(f"WARN: persistent profile update flow failed: {e}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--vod-id", default=VOD_ID)
@@ -1605,6 +1806,28 @@ if __name__ == "__main__":
     parser.add_argument("--skip-audio", action="store_true", help="Skip audio analysis phase")
     parser.add_argument("--top-clips", type=int, default=AUDIO_CLIPS_TO_PROCESS, help="Number of top clips for audio analysis")
     parser.add_argument("--vod-mp4", default=None, help="Path to VOD MP4 for audio extraction")
+    parser.add_argument("--streamer-id", default=None, help="Override streamer ID for persistent intelligence")
+    parser.add_argument(
+        "--profile-root",
+        default=None,
+        help="Root dir for persistent streamer profiles (default: data/streamer_intelligence)",
+    )
+    parser.add_argument(
+        "--enable-persistent-intelligence",
+        action="store_true",
+        help="Enable loading persistent streamer profile context for prompts",
+    )
+    parser.add_argument(
+        "--update-streamer-profile",
+        action="store_true",
+        help="Enable writing profile_update_proposal and profile merge flow",
+    )
+    parser.add_argument(
+        "--profile-update-mode",
+        choices=["propose", "auto", "off"],
+        default=PROFILE_UPDATE_MODE,
+        help="Persistent profile update mode (propose, auto, off)",
+    )
 
     args, _ = parser.parse_known_args()
     VOD_ID = args.vod_id
@@ -1624,4 +1847,17 @@ if __name__ == "__main__":
         VOD_MP4_PATH = args.vod_mp4
 
     CLIPS_PER_BATCH = args.batch_size
+
+    if args.streamer_id:
+        STREAMER_ID_OVERRIDE = args.streamer_id
+    if args.profile_root:
+        STREAMER_PROFILE_ROOT = Path(args.profile_root)
+    if args.enable_persistent_intelligence:
+        ENABLE_PERSISTENT_INTELLIGENCE = True
+
+    if args.update_streamer_profile:
+        UPDATE_STREAMER_PROFILE = True
+        ENABLE_PERSISTENT_INTELLIGENCE = True
+    PROFILE_UPDATE_MODE = args.profile_update_mode
+
     run()

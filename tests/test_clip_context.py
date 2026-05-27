@@ -78,3 +78,55 @@ def test_render_prompt_context_includes_dead_air_and_chat_read_annotations():
     assert "⚠️ CHAT-READ FLAGS" in transcript_text
     assert "@Buchaanan" in transcript_text
     assert "@Buchaanan" in chat_text
+
+
+def test_build_clip_context_includes_speaker_stats_and_warning_for_non_streamer_primary():
+    transcript_segments = [
+        {"start": 100.0, "end": 103.0, "text": "guest starts talking"},
+        {"start": 104.0, "end": 108.0, "text": "streamer replies briefly"},
+    ]
+    speaker_attribution = {
+        "segments": [
+            {
+                "start": 99.0,
+                "end": 106.0,
+                "speaker_label": "SPEAKER_01",
+                "recognition": {"identity": "guest", "confidence": 0.88},
+                "inferred_name": "SkitchFriend",
+            },
+            {
+                "start": 106.0,
+                "end": 108.0,
+                "speaker_label": "SPEAKER_00",
+                "recognition": {"identity": "streamer", "confidence": 0.74},
+                "inferred_name": "Skitch",
+            },
+        ],
+        "speaker_clusters": {
+            "SPEAKER_01": {
+                "candidate_names": [
+                    {
+                        "name": "SkitchFriend",
+                        "confidence": 0.8,
+                        "evidence": ["hey skitchfriend"],
+                    }
+                ]
+            }
+        },
+    }
+
+    ctx = build_clip_context(
+        seconds=105,
+        transcript_segments=transcript_segments,
+        chat_messages=[],
+        window=10,
+        speaker_attribution=speaker_attribution,
+    )
+
+    assert ctx["primary_speaker_identity"] == "guest"
+    assert ctx["primary_speaker_name"] == "SkitchFriend"
+    assert ctx["off_streamer_voice_detected"] is True
+    assert ctx["speaker_turns"]
+
+    transcript_text, _ = render_prompt_context(ctx)
+    assert "⚠️ SPEAKER ATTRIBUTION" in transcript_text

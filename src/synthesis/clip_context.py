@@ -10,7 +10,7 @@ signals used by prompt construction and scoring:
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from src.synthesis.schemas import validate_stage_payload
 
@@ -50,12 +50,144 @@ def _looks_like_read_aloud(message: str, transcript_text_lower: str) -> bool:
     return len(overlap) >= 4 and overlap_ratio >= 0.35
 
 
+def _overlap_seconds(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+    return max(0.0, min(a_end, b_end) - max(a_start, b_start))
+
+
+def _extract_speaker_context(
+    lo: float,
+    hi: float,
+    speaker_attribution: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    if not isinstance(speaker_attribution, dict):
+        return {
+            "speaker_turns": [],
+            "primary_speaker_label": None,
+            "primary_speaker_identity": None,
+            "primary_speaker_name": None,
+            "streamer_speaking_seconds": 0.0,
+            "streamer_speaking_ratio": 0.0,
+            "streamer_speaking_confidence": 0.0,
+            "off_streamer_voice_detected": False,
+            "speaker_name_evidence": [],
+        }
+
+    segments = speaker_attribution.get("segments") or []
+    if not isinstance(segments, list):
+        segments = []
+
+    speaker_turns: List[Dict[str, Any]] = []
+    totals_by_label: Dict[str, float] = {}
+    max_conf_by_label: Dict[str, float] = {}
+    identity_by_label: Dict[str, str] = {}
+    name_by_label: Dict[str, str | None] = {}
+
+    streamer_speaking_seconds = 0.0
+
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+
+        ss = _safe_float(seg.get("start"), -1)
+        se = _safe_float(seg.get("end"), -1)
+        if se <= ss:
+            continue
+
+        overlap = _overlap_seconds(ss, se, lo, hi)
+        if overlap <= 0:
+            continue
+
+        label = _normalize_text(seg.get("speaker_label", "UNKNOWN")) or "UNKNOWN"
+        rec = seg.get("recognition") if isinstance(seg.get("recognition"), dict) else {}
+        identity = _normalize_text(rec.get("identity", "unknown")).lower() or "unknown"
+        if identity not in {"streamer", "guest", "unknown", "chatter", "mixed"}:
+            identity = "unknown"
+        conf = _safe_float(rec.get("confidence"), 0.0)
+        inferred_name = seg.get("inferred_name")
+        inferred_name = _normalize_text(inferred_name) if inferred_name is not None else None
+
+        speaker_turns.append(
+            {
+                "start": max(lo, ss),
+                "end": min(hi, se),
+                "speaker_label": label,
+                "identity": identity,
+                "inferred_name": inferred_name,
+                "confidence": max(0.0, min(1.0, conf)),
+            }
+        )
+
+        totals_by_label[label] = totals_by_label.get(label, 0.0) + overlap
+        max_conf_by_label[label] = max(max_conf_by_label.get(label, 0.0), conf)
+        identity_by_label[label] = identity
+        name_by_label[label] = inferred_name
+
+        if identity == "streamer":
+            streamer_speaking_seconds += overlap
+
+    clip_duration = max(1.0, hi - lo)
+    streamer_ratio = max(0.0, min(1.0, streamer_speaking_seconds / clip_duration))
+
+    primary_speaker_label = None
+    primary_speaker_identity = None
+    primary_speaker_name = None
+    streamer_confidence = 0.0
+
+    if totals_by_label:
+        primary_speaker_label = max(totals_by_label, key=lambda k: totals_by_label[k])
+        primary_speaker_identity = identity_by_label.get(primary_speaker_label, "unknown")
+        primary_speaker_name = name_by_label.get(primary_speaker_label)
+
+    for label, ident in identity_by_label.items():
+        if ident == "streamer":
+            streamer_confidence = max(streamer_confidence, max_conf_by_label.get(label, 0.0))
+
+    off_streamer = any(
+        ident in {"guest", "chatter", "mixed"}
+        for ident in identity_by_label.values()
+    )
+
+    speaker_name_evidence: List[str] = []
+    clusters = speaker_attribution.get("speaker_clusters")
+    if isinstance(clusters, dict):
+        for label, summary in clusters.items():
+            if not isinstance(summary, dict):
+                continue
+            if label != primary_speaker_label:
+                continue
+            candidates = summary.get("candidate_names") or []
+            if isinstance(candidates, list):
+                for c in candidates[:3]:
+                    if not isinstance(c, dict):
+                        continue
+                    nm = _normalize_text(c.get("name", ""))
+                    ev = c.get("evidence") or []
+                    if nm:
+                        if isinstance(ev, list) and ev:
+                            speaker_name_evidence.append(f"{nm}: {str(ev[0])}")
+                        else:
+                            speaker_name_evidence.append(f"{nm}: inferred name candidate")
+
+    return {
+        "speaker_turns": speaker_turns,
+        "primary_speaker_label": primary_speaker_label,
+        "primary_speaker_identity": primary_speaker_identity,
+        "primary_speaker_name": primary_speaker_name,
+        "streamer_speaking_seconds": round(streamer_speaking_seconds, 3),
+        "streamer_speaking_ratio": round(streamer_ratio, 6),
+        "streamer_speaking_confidence": round(max(0.0, min(1.0, streamer_confidence)), 6),
+        "off_streamer_voice_detected": bool(off_streamer),
+        "speaker_name_evidence": speaker_name_evidence,
+    }
+
+
 def build_clip_context(
     seconds: float,
     transcript_segments: List[Dict],
     chat_messages: List[Dict],
     window: float = 120,
     objects_detected: List[str] | None = None,
+    speaker_attribution: Dict[str, Any] | None = None,
 ) -> Dict:
     """Build structured context around a timestamp.
 
@@ -132,6 +264,8 @@ def build_clip_context(
                 }
             )
 
+    speaker_context = _extract_speaker_context(lo, hi, speaker_attribution)
+
     context_payload = {
         "clip_start": float(round(lo, 3)),
         "clip_end": float(round(hi, 3)),
@@ -142,6 +276,15 @@ def build_clip_context(
         "total_dead_air_seconds": total_dead_air_seconds,
         "dead_air_ratio": float(round(dead_air_ratio, 6)),
         "objects_detected": objects_detected or [],
+        "speaker_turns": speaker_context["speaker_turns"],
+        "primary_speaker_label": speaker_context["primary_speaker_label"],
+        "primary_speaker_identity": speaker_context["primary_speaker_identity"],
+        "primary_speaker_name": speaker_context["primary_speaker_name"],
+        "streamer_speaking_seconds": speaker_context["streamer_speaking_seconds"],
+        "streamer_speaking_ratio": speaker_context["streamer_speaking_ratio"],
+        "streamer_speaking_confidence": speaker_context["streamer_speaking_confidence"],
+        "off_streamer_voice_detected": speaker_context["off_streamer_voice_detected"],
+        "speaker_name_evidence": speaker_context["speaker_name_evidence"],
     }
 
     validated = validate_stage_payload("context", context_payload)
@@ -158,6 +301,10 @@ def render_prompt_context(context: Dict, transcript_char_limit: int = 2000) -> T
     chat_messages = context.get("chat_messages", [])
     dead_air_gaps = context.get("dead_air_gaps", [])
     chat_read_flags = context.get("chat_read_flags", [])
+    primary_speaker_identity = context.get("primary_speaker_identity")
+    primary_speaker_label = context.get("primary_speaker_label")
+    primary_speaker_name = context.get("primary_speaker_name")
+    streamer_ratio = float(context.get("streamer_speaking_ratio") or 0.0)
 
     txt_lines = [
         f"[{line.get('start', 0):.0f}s-{line.get('end', 0):.0f}s] {line.get('text', '')}"
@@ -189,6 +336,19 @@ def render_prompt_context(context: Dict, transcript_char_limit: int = 2000) -> T
             "\nREMINDER: When a chat message appears in the transcript, it is often the "
             "CHATTER's story and the streamer may be reading it aloud. Keep attribution accurate "
             "and avoid framing it as the streamer's personal claim unless evidence supports that."
+        )
+
+    if primary_speaker_identity and primary_speaker_identity != "streamer":
+        display_name = primary_speaker_name or primary_speaker_label or "unknown speaker"
+        transcript_text += (
+            "\n\n⚠️ SPEAKER ATTRIBUTION: "
+            f"Primary voice is {display_name} ({primary_speaker_identity}), not streamer. "
+            "Do not title this as a streamer reaction unless streamer speech is the payoff."
+        )
+    elif primary_speaker_identity == "streamer" and streamer_ratio < 0.15:
+        transcript_text += (
+            "\n\n⚠️ SPEAKER ATTRIBUTION: streamer identity detected but speaking ratio is low "
+            f"({streamer_ratio:.2f}). Verify title framing before calling this a streamer-led moment."
         )
 
     transcript_text = transcript_text[:transcript_char_limit]

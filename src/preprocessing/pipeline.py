@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from src.models.types import FusionResult
+from src.preprocessing.types import FusionResult
 from src.preprocessing.downloader import download_vod, cleanup, extract_vod_id
 from src.preprocessing.transcriber import transcribe
 from src.preprocessing.scene_detector import detect_scenes
@@ -206,7 +206,7 @@ def run_pipeline_minimal(
         _, vod_meta = download_vod(url, workdir, audio_only=False)
 
     if vod_meta is None:
-        from src.models.types import VodMeta
+        from src.preprocessing.types import VodMeta
         vod_meta = VodMeta(
             id=vod_id,
             title=f"Test_{vod_id}",

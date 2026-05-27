@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from src.models.types import TranscriptResult, TranscriptSegment, WordTiming
+from src.preprocessing.types import TranscriptResult, TranscriptSegment, WordTiming
 
 
 def transcribe(

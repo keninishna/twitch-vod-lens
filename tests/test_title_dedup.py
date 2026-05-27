@@ -308,3 +308,67 @@ def test_finalize_stage3_candidates_chat_title_removes_redundant_chat_message_ph
 
     assert len(final) == 1
     assert final[0]["clip_point"] == "What happens when chat drops a message about a streak?"
+
+
+def test_finalize_stage3_candidates_preserves_speaker_attribution_fields_in_output():
+    scored = [
+        {
+            "candidate_id": "stitched_100_220_1",
+            "start": 100,
+            "end": 220,
+            "final_score": 8.1,
+            "raw_score": 8.3,
+            "eligible_for_final": True,
+            "penalty_trace": [],
+            "hard_gates": [],
+            "rejection_reasons": [],
+            "trim_source": "qwen",
+        }
+    ]
+
+    stitched = [
+        {
+            "stitched_id": "stitched_100_220_1",
+            "start": 100,
+            "end": 220,
+            "narrative_type": "chat_banter",
+            "trigger": "guest asks a sharp question",
+            "payoff": "streamer answers and laughs",
+            "evidence_lines": ["[130s] guest question", "[148s] streamer response"],
+            "confidence": 0.86,
+            "source_candidate_ids": ["cand_100"],
+            "source_windows": [[100, 220]],
+            "merge_reasons": ["single_candidate"],
+        }
+    ]
+
+    analysis_by_candidate = {
+        "stitched_100_220_1": {
+            "clip_point": "Streamer answers a guest's wild question",
+            "suggested_trim_start": 128,
+            "suggested_trim_end": 168,
+            "platform_scores": {"twitch": 8},
+            "platform_recommendations": ["twitch"],
+            "speaker_attribution": {
+                "primary_speaker_identity": "guest",
+                "primary_speaker_name": "SkitchFriend",
+                "streamer_speaking_ratio": 0.22,
+                "streamer_speaking_confidence": 0.77,
+                "off_streamer_voice_detected": True,
+                "evidence": ["SPEAKER_01 dominates first half"],
+            },
+        }
+    }
+
+    final = finalize_stage3_candidates(
+        scored_candidates=scored,
+        stitched_candidates=stitched,
+        analysis_by_candidate=analysis_by_candidate,
+        min_score=7.0,
+    )
+
+    assert len(final) == 1
+    sa = final[0]["speaker_attribution"]
+    assert sa["primary_speaker_identity"] == "guest"
+    assert sa["primary_speaker_name"] == "SkitchFriend"
+    assert sa["off_streamer_voice_detected"] is True

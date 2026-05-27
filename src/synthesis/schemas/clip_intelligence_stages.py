@@ -63,6 +63,21 @@ class DeadAirGap(StrictModel):
         return self
 
 
+class SpeakerTurnLite(StrictModel):
+    start: float = Field(ge=0)
+    end: float = Field(gt=0)
+    speaker_label: str
+    identity: Literal["streamer", "guest", "unknown", "chatter", "mixed"] = "unknown"
+    inferred_name: str | None = None
+    confidence: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> "SpeakerTurnLite":
+        if self.end <= self.start:
+            raise ValueError("speaker turn end must be > start")
+        return self
+
+
 class ClipContext(StrictModel):
     clip_start: float = Field(ge=0)
     clip_end: float = Field(gt=0)
@@ -73,6 +88,15 @@ class ClipContext(StrictModel):
     total_dead_air_seconds: float = Field(ge=0)
     dead_air_ratio: float = Field(ge=0, le=1)
     objects_detected: List[str]
+    speaker_turns: List[SpeakerTurnLite] = Field(default_factory=list)
+    primary_speaker_label: str | None = None
+    primary_speaker_identity: Literal["streamer", "guest", "unknown", "chatter", "mixed"] | None = None
+    primary_speaker_name: str | None = None
+    streamer_speaking_seconds: float = Field(default=0.0, ge=0)
+    streamer_speaking_ratio: float = Field(default=0.0, ge=0, le=1)
+    streamer_speaking_confidence: float = Field(default=0.0, ge=0, le=1)
+    off_streamer_voice_detected: bool = False
+    speaker_name_evidence: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_window(self) -> "ClipContext":
@@ -160,6 +184,15 @@ class IntelligenceReport(StrictModel):
     streamer_feedback: str
 
 
+class FinalSpeakerAttribution(StrictModel):
+    primary_speaker_identity: Literal["streamer", "guest", "unknown", "chatter", "mixed"] = "unknown"
+    primary_speaker_name: str | None = None
+    streamer_speaking_ratio: float = Field(ge=0, le=1)
+    streamer_speaking_confidence: float = Field(ge=0, le=1)
+    off_streamer_voice_detected: bool = False
+    evidence: List[str] = Field(default_factory=list)
+
+
 class FinalSelectedClip(StrictModel):
     rank: int = Field(ge=1)
     clip_id: str
@@ -176,6 +209,7 @@ class FinalSelectedClip(StrictModel):
     platform_scores: Dict[str, float]
     platform_recommendations: List[str]
     intelligence_report: IntelligenceReport
+    speaker_attribution: FinalSpeakerAttribution | None = None
 
     @model_validator(mode="after")
     def _validate_ranges(self) -> "FinalSelectedClip":

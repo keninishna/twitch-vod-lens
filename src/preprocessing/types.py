@@ -8,8 +8,8 @@ from this file to prevent field name drift across workers.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, model_validator
+from typing import Dict, List, Literal, Optional
 
 
 class VodMeta(BaseModel):
@@ -127,3 +127,75 @@ class ClipSuggestion(BaseModel):
             "instagram_reels": 0.0,
         }
     )
+
+
+SpeakerIdentity = Literal["streamer", "guest", "unknown", "chatter", "mixed"]
+
+
+class SpeakerRecognitionResult(BaseModel):
+    """Voice-profile match output for a speaker turn or cluster."""
+
+    identity: SpeakerIdentity = "unknown"
+    confidence: float = Field(ge=0.0, le=1.0)
+    cosine_similarity: Optional[float] = Field(default=None, ge=-1.0, le=1.0)
+    profile_id: Optional[str] = None
+
+
+class SpeakerNameCandidate(BaseModel):
+    """Text-inferred possible speaker name with supporting evidence."""
+
+    name: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence: List[str] = Field(default_factory=list)
+
+
+class SpeakerTurn(BaseModel):
+    """Anonymous diarization turn with optional recognition + name inference."""
+
+    start: float = Field(ge=0.0)
+    end: float = Field(gt=0.0)
+    speaker_label: str
+    exclusive: bool = True
+    recognition: Optional[SpeakerRecognitionResult] = None
+    inferred_name: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> "SpeakerTurn":
+        if self.end <= self.start:
+            raise ValueError("SpeakerTurn end must be greater than start")
+        return self
+
+
+class SpeakerClusterSummary(BaseModel):
+    """Aggregate stats for each diarization speaker label."""
+
+    total_speech_seconds: float = Field(ge=0.0)
+    segment_count: int = Field(ge=0)
+    primary_identity: SpeakerIdentity = "unknown"
+    primary_identity_confidence: float = Field(ge=0.0, le=1.0)
+    candidate_names: List[SpeakerNameCandidate] = Field(default_factory=list)
+
+
+class ClipSpeakerStats(BaseModel):
+    """Per-clip speaker composition summary used in synthesis context."""
+
+    primary_speaker_label: str
+    primary_speaker_identity: SpeakerIdentity = "unknown"
+    primary_speaker_name: Optional[str] = None
+    streamer_speaking_seconds: float = Field(ge=0.0)
+    streamer_speaking_ratio: float = Field(ge=0.0, le=1.0)
+    streamer_speaking_confidence: float = Field(ge=0.0, le=1.0)
+    off_streamer_voice_detected: bool = False
+    dominant_non_streamer_label: Optional[str] = None
+    dominant_non_streamer_name: Optional[str] = None
+
+
+class SpeakerAttributionResult(BaseModel):
+    """Full per-VOD speaker attribution artifact contract."""
+
+    vod_id: str
+    audio_path: str
+    backend: Dict[str, str] = Field(default_factory=dict)
+    segments: List[SpeakerTurn]
+    speaker_clusters: Dict[str, SpeakerClusterSummary] = Field(default_factory=dict)
+    clip_speaker_stats: Dict[str, ClipSpeakerStats] = Field(default_factory=dict)

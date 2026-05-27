@@ -1,15 +1,101 @@
-"""Signal fusion engine.
+"""Signal fusion engines.
 
-Takes transcript, scenes, and chat spikes and computes weighted
-interesting-moment scores. Merges overlapping events and ranks by score.
+This module provides two fusion paths:
+
+1) `fuse_signals(...)` (legacy): file-path based JSON fusion used by preprocess.py.
+2) `fuse(...)` (typed): model-based fusion used by src/preprocessing/pipeline.py.
 """
 
+from __future__ import annotations
+
 import json
+from typing import Iterable
+
+from src.preprocessing.types import (
+    ChatAnalysis,
+    FusionResult,
+    FusionTimeline,
+    SceneClip,
+    TranscriptResult,
+    VodMeta,
+)
+
+
+def _chat_intensity_at(chat: ChatAnalysis, ts: float) -> float:
+    """Compute a simple deterministic chat intensity at timestamp ts.
+
+    Intensity is normalized message count per activity window and clamped to [0, 10].
+    """
+    for window in chat.activity:
+        if window.window_start <= ts < window.window_end:
+            width = max(1.0, window.window_end - window.window_start)
+            return min(10.0, window.message_count / width)
+    return 0.0
+
+
+def _top_emotes_at(chat: ChatAnalysis, ts: float, window_seconds: float = 15.0) -> list[str]:
+    """Collect up to 5 most frequent emotes around a timestamp."""
+    start = ts - window_seconds
+    end = ts + window_seconds
+
+    counts: dict[str, int] = {}
+    for msg in chat.messages:
+        if start <= msg.timestamp <= end and msg.emotes:
+            for em in msg.emotes:
+                counts[em] = counts.get(em, 0) + 1
+
+    ranked = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+    return [em for em, _ in ranked[:5]]
+
+
+def _scene_change_for_timestamp(scenes: Iterable[SceneClip], ts: float, tolerance: float = 2.0) -> tuple[bool, int | None]:
+    """Return whether ts is near a scene boundary and that scene index."""
+    for scene in scenes:
+        # boundary-like points: near scene start
+        if abs(ts - scene.start) <= tolerance:
+            return True, scene.index
+    return False, None
+
+
+def fuse(
+    *,
+    vod_meta: VodMeta,
+    transcript: TranscriptResult,
+    scenes: list[SceneClip],
+    chat: ChatAnalysis,
+) -> FusionResult:
+    """Typed fusion path used by pipeline.py.
+
+    Produces a deterministic timeline keyed by transcript segment starts.
+    """
+    timeline: list[FusionTimeline] = []
+
+    for seg in transcript.segments:
+        scene_change, scene_index = _scene_change_for_timestamp(scenes, seg.start)
+        timeline.append(
+            FusionTimeline(
+                timestamp=seg.start,
+                transcript=seg,
+                scene_change=scene_change,
+                scene_index=scene_index,
+                chat_intensity=_chat_intensity_at(chat, seg.start),
+                top_emotes=_top_emotes_at(chat, seg.start),
+            )
+        )
+
+    return FusionResult(
+        vod_meta=vod_meta,
+        transcript=transcript,
+        scenes=scenes,
+        chat=chat,
+        timeline=timeline,
+        processing_time_seconds=0.0,
+    )
 
 
 def fuse_signals(transcript_path: str, scenes_path: str,
                  chat_path: str, output_path: str) -> int:
-    """Fuse all signals into scored moments.
+    """Fuse all signals into scored moments (legacy file-path API).
 
     Args:
         transcript_path: Path to transcript.json.
