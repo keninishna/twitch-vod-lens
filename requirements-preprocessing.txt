@@ -1,0 +1,20 @@
+# VOD Lens local preprocessing requirements
+#
+# Lightweight Python packages used by local orchestration/validation code.
+# GPU-heavy preprocessing and model serving remain Dockerized or optional:
+# - WhisperX transcription image
+# - YOLO / vod-lens-worker image
+# - vLLM audio image
+# - Bee/Qwen vision backend (external service)
+#
+# Speaker attribution dependencies are intentionally split into
+# requirements-speakerid.txt because pyannote/SpeechBrain/Torch installs are
+# optional, GPU-sensitive, and require HuggingFace gated-model access.
+
+pydantic>=2.0.0
+requests>=2.31.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+scenedetect>=0.6.2
+yt-dlp>=2024.1.0

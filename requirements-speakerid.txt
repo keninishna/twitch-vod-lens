@@ -1,3 +1,8 @@
+# Optional SpeakerID dependency stack for speaker attribution only.
+# Not required for lightweight preprocessing; keep this separate from requirements-preprocessing.txt.
+# Includes a heavy, GPU-sensitive Torch/Torchaudio audio-ML stack.
+# Requires HF_TOKEN or HUGGINGFACE_TOKEN and accepted terms for gated pyannote models.
+
 pyannote.audio>=4.0.0
 speechbrain>=1.0.0
 torchaudio>=2.0.0

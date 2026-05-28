@@ -113,7 +113,7 @@ Do **not** reuse/symlink phase4 data across different VOD IDs.
 **Still open / in progress:**
 4. **Task 20:** runbook docs split remains incomplete (`docs/references/speaker-attribution.md` and `docs/references/persistent-streamer-intelligence.md` are not present).
 5. **Task 25:** YOLO-aware phase4 manifest quality hardening not yet implemented (manifest still baseline deterministic windows + speech/chat heuristics).
-6. **Task 26:** preprocessing/runtime environment contract only partially documented (speaker deps file exists; preprocessing deps contract still incomplete).
+6. **Task 26:** preprocessing/runtime environment contract is now documented in this brief; rollout should still validate real WSL image/tag naming in active environments.
 7. **Task 27:** Bee managed startup/reliability path (`--start-bee` / configurable start command / strict fail-fast on health failure) remains open.
 8. **Task 28:** raw VOD extraction path resolution is partially improved but not yet fully canonicalized against phase4 metadata contract.
 
@@ -223,17 +223,59 @@ Per final clip expected fields:
 
 ---
 
-## 10) Current Open Risks
+## 10) Preprocessing / Runtime Environment Contract
+
+### 10.1 Local Python venv
+Use `requirements-preprocessing.txt` for lightweight local orchestration and validation only:
+- phase4 prep/validation CLIs,
+- manifest/frame/context utilities,
+- JSON/data-model validation,
+- non-GPU helper scripts.
+
+Do **not** assume a fresh `vod-lens-venv` contains GPU-heavy preprocessing dependencies.
+
+### 10.2 Dockerized / external runtimes
+These are not guaranteed by the lightweight local venv:
+- WhisperX transcription image / runtime,
+- YOLO / `vod-lens-worker` image for object/frame processing,
+- vLLM audio image for Omni/audio analysis,
+- Bee/Qwen vision backend service on the configured API URL.
+
+### 10.3 Optional SpeakerID runtime
+Speaker attribution uses `requirements-speakerid.txt` and is optional/gated:
+- `pyannote.audio`, `speechbrain`, `torch`/`torchaudio`, `soundfile`, `librosa`,
+- `HF_TOKEN` or `HUGGINGFACE_TOKEN`,
+- accepted HuggingFace terms for gated pyannote models.
+
+Keep this stack separate from lightweight preprocessing because it is GPU-sensitive and model-access dependent.
+
+### 10.4 WSL readiness checks
+```bash
+docker image ls | grep -E 'whisperx|vod-lens-worker|vllm'
+ffmpeg -version
+yt-dlp --version
+python3 --version
+```
+
+### 10.5 Failure diagnosis
+- Missing Docker image: preprocessing step fails before producing expected phase4 artifacts; pull/build the relevant WhisperX, worker/YOLO, or vLLM image.
+- Missing local Python package: phase4 prep/validation import fails; install `requirements-preprocessing.txt` in the local venv.
+- Missing HF token or gated-model access: SpeakerID diarization fails; export `HF_TOKEN`/`HUGGINGFACE_TOKEN` and accept pyannote model terms.
+- Bee not running/unhealthy: synthesis should fail preflight or produce model connection errors; start/check Bee separately (Task 27 owns managed Bee startup hardening).
+
+---
+
+## 11) Current Open Risks
 
 1. Task-20 doc artifacts are still missing (speaker attribution + persistent-intelligence reference docs).
 2. `clip_manifest.json` generation is functional but not yet YOLO-aware ranking parity.
 3. Bee readiness/startup reliability remains partially manual; preflight can timeout and continue.
 4. Raw VOD path resolution for extraction is improved but not yet fully canonicalized to phase4 metadata.
-5. Preprocessing/runtime dependency contract is still incomplete for fully reproducible WSL runs.
+5. Runtime/dependency contract is now documented, but real WSL image/tag naming should still be validated during rollout.
 
 ---
 
-## 11) Related Docs
+## 12) Related Docs
 
 - `docs/plans/speakerid.md` (hub)
 - `docs/plans/speakerid/05-docs-validation-rollout.md` (current next-phase tasks)
