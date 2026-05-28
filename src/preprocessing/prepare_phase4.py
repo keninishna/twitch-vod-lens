@@ -42,6 +42,7 @@ from src.intelligence.streamer_store import (
     load_streamer_profile,
     resolve_streamer_id_context,
 )
+from src.preprocessing.clip_manifest import generate_clip_manifest, load_yolo_detections
 from src.preprocessing.speaker_attribution import generate_speaker_attribution
 from src.preprocessing.speaker_profiles import load_profiles
 from src.preprocessing.validate_phase4_inputs import validate_phase4_dir
@@ -596,13 +597,17 @@ def main() -> int:
                 f"mode={args.profile_update_mode}"
             )
 
-        manifest = _windowed_clip_manifest(
+        yolo_path = phase4_dir / "yolo_detections.json"
+        yolo_frames = load_yolo_detections(yolo_path)
+
+        manifest = generate_clip_manifest(
             fusion,
             vod_id=vod_id,
             vod_title=vod_title,
             streamer=streamer,
             window_seconds=args.window_seconds,
             step_seconds=args.step_seconds,
+            yolo_frames=yolo_frames,
         )
         _save_json(manifest_out, manifest)
         print(f"[prepare_phase4] wrote manifest: {manifest_out} (clips={manifest['total_clips']})")
