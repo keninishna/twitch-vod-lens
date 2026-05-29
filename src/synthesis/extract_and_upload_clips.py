@@ -84,38 +84,76 @@ def _extract_vod_id(data: dict, json_path: Path) -> str | None:
     return None
 
 
-def resolve_vod_path(explicit_vod: str | None, data: dict, json_path: Path) -> Path:
-    """Resolve raw MP4 path from explicit arg or common phase4 layouts."""
-    if explicit_vod:
-        return Path(explicit_vod).expanduser().resolve()
+def _metadata_raw_vod_candidates(fusion_data: dict | None, phase4_dir: Path) -> list[Path]:
+    if not isinstance(fusion_data, dict):
+        return []
 
-    vod_id = _extract_vod_id(data, json_path)
+    vod_meta = fusion_data.get("vod_meta") if isinstance(fusion_data.get("vod_meta"), dict) else {}
+
+    raw_values: list[str] = []
+    for key in ("source_video", "raw_vod_path", "vod_path"):
+        value = vod_meta.get(key)
+        if isinstance(value, str) and value.strip():
+            raw_values.append(value.strip())
+
+    top_level = fusion_data.get("raw_vod_path")
+    if isinstance(top_level, str) and top_level.strip():
+        raw_values.append(top_level.strip())
+
     candidates: list[Path] = []
+    for raw in raw_values:
+        p = Path(raw).expanduser()
+        if p.is_absolute():
+            candidates.append(p.resolve())
+        else:
+            candidates.append((phase4_dir / p).resolve())
+    return candidates
 
-    # Relative to output JSON location
+
+def resolve_raw_vod_path(
+    vod_id: str | None,
+    phase4_dir: Path,
+    explicit_path: Path | None = None,
+    fusion_data: dict | None = None,
+) -> Path:
+    """Resolve raw MP4 path in canonical order for Task 28."""
+    checked: list[Path] = []
+
+    # 1) explicit --vod path
+    if explicit_path is not None:
+        explicit_candidate = explicit_path.expanduser().resolve()
+        checked.append(explicit_candidate)
+        if explicit_candidate.exists():
+            return explicit_candidate
+
+    # 2) phase4_<VOD_ID>/raw/<VOD_ID>.mp4
     if vod_id:
-        candidates.extend([
-            json_path.parent / "raw" / f"{vod_id}.mp4",
-            json_path.parent / f"{vod_id}.mp4",
-            json_path.parent.parent / "raw" / f"{vod_id}.mp4",
-            Path.cwd() / "raw" / f"{vod_id}.mp4",
-        ])
+        phase4_candidate = (phase4_dir / "raw" / f"{vod_id}.mp4").resolve()
+        checked.append(phase4_candidate)
+        if phase4_candidate.exists():
+            return phase4_candidate
 
-    # Generic fallback if JSON sits inside phase4_* tree
-    candidates.extend([
-        json_path.parent / "raw" / "vod.mp4",
-        json_path.parent.parent / "raw" / "vod.mp4",
-    ])
+    # 3) raw path from fusion metadata
+    for candidate in _metadata_raw_vod_candidates(fusion_data, phase4_dir):
+        checked.append(candidate)
+        if candidate.exists():
+            return candidate
 
-    for c in candidates:
-        if c.exists():
-            return c.resolve()
+    # 4) legacy repo-level raw/<VOD_ID>.mp4
+    if vod_id:
+        repo_root = Path(__file__).resolve().parents[2]
+        legacy_candidate = (repo_root / "raw" / f"{vod_id}.mp4").resolve()
+        checked.append(legacy_candidate)
+        if legacy_candidate.exists():
+            log(f"WARN: using legacy repo-level raw path: {legacy_candidate}")
+            return legacy_candidate
 
-    searched = "\n".join(f"  - {p}" for p in candidates)
+    searched = "\n".join(f"  - {p}" for p in checked) if checked else "  - (no candidates)"
     raise FileNotFoundError(
-        "Could not auto-detect raw VOD mp4. "
-        "Pass --vod explicitly.\nSearched:\n"
-        f"{searched}"
+        "Could not resolve raw VOD mp4.\n"
+        "Checked:\n"
+        f"{searched}\n"
+        "Remediation: pass an explicit file with --vod /absolute/path/to/<VOD_ID>.mp4"
     )
 
 
@@ -217,6 +255,10 @@ def main() -> None:
         help="Path to raw VOD mp4 (optional; auto-detected if omitted)",
     )
     parser.add_argument(
+        "--vod-id",
+        help="Override VOD ID used for raw VOD/fusion path resolution",
+    )
+    parser.add_argument(
         "--min-score",
         type=int,
         default=7,
@@ -244,11 +286,38 @@ def main() -> None:
     log(f"Loading pipeline output: {json_path}")
     data = load_pipeline_json(str(json_path))
 
+    inferred_vod_id = _extract_vod_id(data, json_path)
+    vod_id = args.vod_id.strip() if isinstance(args.vod_id, str) and args.vod_id.strip() else inferred_vod_id
+    phase4_dir = json_path.parent
+    explicit_vod = Path(args.vod) if args.vod else None
+
+    fusion_data: dict | None = None
+    if vod_id:
+        fusion_path = phase4_dir / f"fusion_result_{vod_id}.json"
+        if fusion_path.exists():
+            try:
+                with open(fusion_path, "r", encoding="utf-8") as f:
+                    parsed = json.load(f)
+                if isinstance(parsed, dict):
+                    fusion_data = parsed
+                else:
+                    log(f"WARN: fusion metadata is not a JSON object: {fusion_path}")
+            except (OSError, json.JSONDecodeError) as exc:
+                log(f"WARN: could not parse fusion metadata {fusion_path}: {exc}")
+
     try:
-        vod_path = resolve_vod_path(args.vod, data, json_path)
+        vod_path = resolve_raw_vod_path(
+            vod_id=vod_id,
+            phase4_dir=phase4_dir,
+            explicit_path=explicit_vod,
+            fusion_data=fusion_data,
+        )
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
+
+    if args.dry_run:
+        log(f"[DRY RUN] Resolved VOD path: {vod_path} (exists={vod_path.exists()})")
 
     if not vod_path.exists():
         print(f"Error: VOD not found: {vod_path}", file=sys.stderr)
