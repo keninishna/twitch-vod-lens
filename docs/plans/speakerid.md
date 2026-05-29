@@ -118,11 +118,15 @@ Then implement only the active phase's next unchecked task.
   - **Task 18 complete:** persistent voice-profile reuse wired into recognition flow (`load_profiles_from_paths`, `load_persistent_voice_profiles`, `generate_speaker_attribution(..., profiles=...)`, CLI hook in `run_speaker_attribution.py`) with focused tests.
   - **Task 19 complete:** full CLI/pipeline flag wiring for persistent-intelligence modes across `prepare_phase4.py`, `qwen_clip_analyzer_progressive.py`, and `validate_phase4_inputs.py`.
 
-- **Phase 05: in progress (Tasks 20–28)**
+- **Phase 05: complete (Tasks 20–28)**
+  - **Task 20 complete:** runbook documentation artifacts now exist at `docs/references/speaker-attribution.md` and `docs/references/persistent-streamer-intelligence.md`.
   - **Task 22 complete:** streamer-id metadata resolution + override mismatch guardrail is implemented (`resolve_streamer_id_context`) and wired through prep/validation/synthesis outputs.
   - **Task 23 complete:** WSL artifact-first validation harness is implemented (`scripts/validate_persistent_intelligence_wsl.sh`).
-  - Remaining priority items: **Task 20**, **Task 25**, **Task 26**, **Task 27**, **Task 28**.
   - **Task 24** is largely complete in code via typed `fuse(...)` + retained legacy `fuse_signals(...)`; keep regression checks and cleanup follow-through as needed.
+  - **Task 25 complete:** phase4 manifest quality hardening implemented in `src/preprocessing/clip_manifest.py` with coverage in `tests/test_clip_manifest_generation.py`.
+  - **Task 26 complete:** reproducible preprocessing/runtime contract split documented via `requirements-preprocessing.txt`, `requirements-speakerid.txt`, and pipeline runbook updates.
+  - **Task 27 complete:** Bee startup/health reliability path implemented (managed start + fail-fast preflight).
+  - **Task 28 complete:** canonical raw VOD resolver implemented in extraction flow with tests in `tests/test_extract_and_upload_clips.py`.
 
 ### Verification snapshot
 
@@ -171,6 +175,8 @@ Result: **29 passed, 1 skipped**.
 ---
 
 ## Next Implementation Plan for AI Agent (May 27, 2026)
+
+Status update: Tasks 20–28 are now implemented. Keep this section as historical context for execution order; use phase docs for any new follow-on work.
 
 > **For Hermes / future agent:** Load this hub plus `docs/plans/speakerid/05-docs-validation-rollout.md`. Execute one task at a time, write/adjust tests first, and commit after each green task. Do not add deterministic Stage-2 speaker-specific penalties or hard gates; attribution remains prompt context and reporting evidence.
 

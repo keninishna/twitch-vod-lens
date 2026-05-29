@@ -106,16 +106,17 @@ Do **not** reuse/symlink phase4 data across different VOD IDs.
 ### Phase 05 status (Tasks 20–28)
 
 **Completed (code-verified):**
-1. **Task 22:** Streamer-ID metadata resolution + override mismatch guardrail is implemented (`resolve_streamer_id_context` wired across prep/validation/synthesis + output `streamer_identity` metadata).
-2. **Task 23:** WSL artifact-first persistent-intelligence validation harness is implemented (`scripts/validate_persistent_intelligence_wsl.sh`).
-3. **Task 24 (largely complete):** modern preprocessing `fuse`/`fuse_signals` contract drift is addressed via typed `fuse(...)` path in `pipeline.py` with legacy `fuse_signals(...)` retained in `fusion.py`.
-4. **Task 27:** Bee managed startup/reliability path is implemented (`--bee-url`, `--start-bee`, `--bee-start-command` / `BEE_START_COMMAND`) with strict fail-fast Bee preflight before Stage 1.
-5. **Task 28:** extraction raw-VOD resolver order is implemented in `extract_and_upload_clips.py` (`--vod` override -> phase4 metadata path -> `raw/<VOD_ID>.mp4` fallback), and `--dry-run` now reports the resolved input path.
+1. **Task 20:** runbook documentation artifacts are now present (`docs/references/speaker-attribution.md`, `docs/references/persistent-streamer-intelligence.md`).
+2. **Task 22:** Streamer-ID metadata resolution + override mismatch guardrail is implemented (`resolve_streamer_id_context` wired across prep/validation/synthesis + output `streamer_identity` metadata).
+3. **Task 23:** WSL artifact-first persistent-intelligence validation harness is implemented (`scripts/validate_persistent_intelligence_wsl.sh`).
+4. **Task 24 (largely complete):** modern preprocessing `fuse`/`fuse_signals` contract drift is addressed via typed `fuse(...)` path in `pipeline.py` with legacy `fuse_signals(...)` retained in `fusion.py`.
+5. **Task 25:** YOLO-aware phase4 manifest hardening is implemented (`src/preprocessing/clip_manifest.py`) with focused coverage in `tests/test_clip_manifest_generation.py`.
+6. **Task 26:** preprocessing/runtime environment contract is documented and split into lightweight preprocessing vs optional SpeakerID stacks (`requirements-preprocessing.txt`, `requirements-speakerid.txt`, runbook contract in this brief).
+7. **Task 27:** Bee managed startup/reliability path is implemented (`--bee-url`, `--start-bee`, `--bee-start-command` / `BEE_START_COMMAND`) with strict fail-fast Bee preflight before Stage 1.
+8. **Task 28:** extraction raw-VOD resolver order is implemented in `extract_and_upload_clips.py` (`--vod` override -> phase4 raw -> fusion metadata path -> legacy `raw/<VOD_ID>.mp4`), and `--dry-run` reports the resolved input path.
 
 **Still open / in progress:**
-6. **Task 20:** runbook docs split remains incomplete (`docs/references/speaker-attribution.md` and `docs/references/persistent-streamer-intelligence.md` are not present).
-7. **Task 25:** YOLO-aware phase4 manifest quality hardening not yet implemented (manifest still baseline deterministic windows + speech/chat heuristics).
-8. **Task 26:** preprocessing/runtime environment contract is now documented in this brief; rollout should still validate real WSL image/tag naming in active environments.
+- None currently in Tasks 20–28; continue rollout validation on real WSL artifacts.
 
 ---
 
@@ -275,11 +276,10 @@ python3 --version
 
 ## 11) Current Open Risks
 
-1. Task-20 doc artifacts are still missing (speaker attribution + persistent-intelligence reference docs).
-2. `clip_manifest.json` generation is functional but not yet YOLO-aware ranking parity.
-3. Bee managed startup is implemented, but launch-command quality and environment-specific startup correctness remain operator-dependent.
-4. Raw VOD resolver is implemented; residual risk is stale/invalid phase4 metadata paths or moved files that require explicit `--vod` override.
-5. Runtime/dependency contract is now documented, but real WSL image/tag naming should still be validated during rollout.
+1. Bee managed startup is implemented, but launch-command quality and environment-specific startup correctness remain operator-dependent.
+2. Raw VOD resolver is implemented; residual risk is stale/invalid phase4 metadata paths or moved files that require explicit `--vod` override.
+3. Runtime/dependency contract is documented, but real WSL image/tag naming should still be validated during rollout.
+4. Task-24 follow-through remains a regression-risk area: keep validating modern preprocessing path behavior in real runs to avoid fallback-only drift.
 
 ---
 
