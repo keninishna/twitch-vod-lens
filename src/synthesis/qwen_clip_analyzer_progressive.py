@@ -45,6 +45,7 @@ from src.intelligence.streamer_store import (
     save_streamer_profile,
 )
 from src.synthesis.audio_normalization import normalize_audio_result
+from src.synthesis.bee_server import ensure_bee_api_ready
 from src.synthesis.clip_context import build_clip_context, render_prompt_context
 from src.synthesis.scoring import normalize_clip_analysis
 from src.synthesis.stage1_discovery import (
@@ -54,46 +55,22 @@ from src.synthesis.stage1_discovery import (
 from src.synthesis.stitching import stitch_discoveries
 from src.synthesis.title_dedup import finalize_stage3_candidates
 
-# ── Bee API health check ──────────────────────────────────────────────
-
-def wait_for_bee_api(timeout: int = 300, check_interval: int = 5):
-    """Block until the Bee API responds on /v1/models.
-
-    Polls every *check_interval* seconds, logs progress every 30s.
-    Returns True if API became ready, False if timeout was reached.
-    """
-    import urllib.request
-    import urllib.error
-
-    log("  Preflight: Checking Bee API readiness ...")
-    ready = False
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        try:
-            req = urllib.request.Request(
-                "http://100.97.240.34:8082/v1/models"
-            )
-            resp = urllib.request.urlopen(req, timeout=check_interval)
-            model_data = json.loads(resp.read().decode())
-            if model_data:
-                ready = True
-                break
-        except Exception:
-            elapsed = time.time() - t0
-            if int(elapsed) % 30 < check_interval:
-                log(f"    Waiting... ({elapsed:.0f}s)")
-            time.sleep(check_interval)
-
-    if ready:
-        log(f"  ✅ Bee API ready after {time.time() - t0:.0f}s")
-    else:
-        log(f"  ❌ Bee API not ready within {timeout}s timeout — continuing anyway")
-    return ready
-
-
 # ── Configuration (tweak per VOD / model) ────────────────────────────
 
-QWEN_API_URL = "http://100.97.240.34:8082/v1/chat/completions"
+DEFAULT_BEE_URL = "http://100.97.240.34:8082"
+BEE_URL = os.environ.get("BEE_URL", DEFAULT_BEE_URL)
+START_BEE = False
+BEE_START_COMMAND = os.environ.get("BEE_START_COMMAND")
+
+
+def bee_models_url() -> str:
+    return f"{BEE_URL.rstrip('/')}/v1/models"
+
+
+def qwen_api_url() -> str:
+    return f"{BEE_URL.rstrip('/')}/v1/chat/completions"
+
+
 QWEN_MODEL  = "Qwen3.6-27B-Q5_K_S.gguf"
 
 # How many clips to analyse per API call (2 clips x 3 frames ~ 6 images).
@@ -205,7 +182,7 @@ def qwen_call(payload, timeout=180):
     """POST payload to Qwen vLLM endpoint. Returns parsed JSON content."""
     import requests
     try:
-        resp = requests.post(QWEN_API_URL, json=payload, timeout=timeout)
+        resp = requests.post(qwen_api_url(), json=payload, timeout=timeout)
         data = resp.json()
         raw = data["choices"][0]["message"]["content"]
         parsed = safe_json_parse(raw)
@@ -480,29 +457,17 @@ def run_audio_phase(clips, all_results, fusion, manifest, speaker_attribution=No
 
     # Step 9: Wait for Bee API to be ready
     log("  Waiting for Bee API to be ready (up to ~3 min cold start)...")
-    import urllib.request
-    import urllib.error
-    
-    api_ready = False
-    api_wait_start = time.time()
-    while time.time() - api_wait_start < 300:
-        try:
-            req = urllib.request.Request(
-                "http://100.97.240.34:8082/v1/models"
-            )
-            resp = urllib.request.urlopen(req, timeout=5)
-            api_ready = True
-            break
-        except Exception:
-            elapsed = time.time() - api_wait_start
-            if int(elapsed) % 30 < 5:
-                log(f"    Waiting... ({elapsed:.0f}s)")
-            time.sleep(5)
-    
-    if api_ready:
-        log(f"  ✅ Bee API ready after {time.time() - api_wait_start:.0f}s")
+    bee_startup = ensure_bee_api_ready(
+        base_url=BEE_URL,
+        start_bee=False,
+        timeout=300,
+        check_interval=5,
+        logger=lambda message: log(f"    {message}"),
+    )
+    if bee_startup.ready:
+        log(f"  ✅ Bee API ready at {bee_models_url()}")
     else:
-        log(f"  ❌ Qwen API did not become ready within timeout")
+        log(f"  ❌ Qwen API did not become ready within timeout ({bee_models_url()})")
     
     total_audio_time = time.time() - t0
     log(f"\n  Audio phase total: {total_audio_time:.0f}s")
@@ -945,8 +910,25 @@ def build_analysis_log_entry(r):
 def run():
     log(f"Loading data for VOD {VOD_ID} ...")
 
-    # Preflight: wait for Bee API if it's not already running
-    wait_for_bee_api()
+    # Preflight: Bee API readiness/startup is required before Stage 1 execution.
+    preflight = ensure_bee_api_ready(
+        base_url=BEE_URL,
+        start_bee=START_BEE,
+        start_command=BEE_START_COMMAND,
+        timeout=300,
+        check_interval=5,
+        logger=lambda message: log(f"  {message}"),
+    )
+    if not preflight.ready:
+        log("ERROR: Bee API preflight failed; aborting before Stage 1.")
+        print(preflight.message)
+        if not START_BEE:
+            print("Hint: re-run with --start-bee and optionally --bee-start-command '<command>'.")
+        sys.exit(2)
+    if preflight.started:
+        log(f"Bee API managed startup succeeded at {bee_models_url()}")
+    else:
+        log(f"Bee API already reachable at {bee_models_url()}")
 
     fusion = load_json(FUSION_PATH)
     manifest = load_json(CLIP_MANIFEST_PATH)
@@ -1802,6 +1784,21 @@ def run():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--vod-id", default=VOD_ID)
+    parser.add_argument(
+        "--bee-url",
+        default=BEE_URL,
+        help=f"Bee API base URL (default: env BEE_URL or {DEFAULT_BEE_URL})",
+    )
+    parser.add_argument(
+        "--start-bee",
+        action="store_true",
+        help="Attempt managed Bee startup when API is not reachable",
+    )
+    parser.add_argument(
+        "--bee-start-command",
+        default=BEE_START_COMMAND,
+        help="Command used with --start-bee (default: env BEE_START_COMMAND)",
+    )
     parser.add_argument("--batch-size", type=int, default=CLIPS_PER_BATCH)
     parser.add_argument("--skip-audio", action="store_true", help="Skip audio analysis phase")
     parser.add_argument("--top-clips", type=int, default=AUDIO_CLIPS_TO_PROCESS, help="Number of top clips for audio analysis")
@@ -1831,6 +1828,9 @@ if __name__ == "__main__":
 
     args, _ = parser.parse_known_args()
     VOD_ID = args.vod_id
+    BEE_URL = args.bee_url
+    START_BEE = args.start_bee
+    BEE_START_COMMAND = args.bee_start_command
     # Recompute VOD-dependent paths now that VOD_ID is known.
     VOD_DIR            = Path(os.environ.get("VOD_DIR",
                              f"/home/john/twitch-vod-analyzer/vods/phase4_{VOD_ID}"))

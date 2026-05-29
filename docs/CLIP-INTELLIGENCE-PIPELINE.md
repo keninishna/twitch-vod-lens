@@ -109,12 +109,12 @@ Do **not** reuse/symlink phase4 data across different VOD IDs.
 1. **Task 22:** Streamer-ID metadata resolution + override mismatch guardrail is implemented (`resolve_streamer_id_context` wired across prep/validation/synthesis + output `streamer_identity` metadata).
 2. **Task 23:** WSL artifact-first persistent-intelligence validation harness is implemented (`scripts/validate_persistent_intelligence_wsl.sh`).
 3. **Task 24 (largely complete):** modern preprocessing `fuse`/`fuse_signals` contract drift is addressed via typed `fuse(...)` path in `pipeline.py` with legacy `fuse_signals(...)` retained in `fusion.py`.
+4. **Task 27:** Bee managed startup/reliability path is implemented (`--bee-url`, `--start-bee`, `--bee-start-command` / `BEE_START_COMMAND`) with strict fail-fast Bee preflight before Stage 1.
 
 **Still open / in progress:**
-4. **Task 20:** runbook docs split remains incomplete (`docs/references/speaker-attribution.md` and `docs/references/persistent-streamer-intelligence.md` are not present).
-5. **Task 25:** YOLO-aware phase4 manifest quality hardening not yet implemented (manifest still baseline deterministic windows + speech/chat heuristics).
-6. **Task 26:** preprocessing/runtime environment contract is now documented in this brief; rollout should still validate real WSL image/tag naming in active environments.
-7. **Task 27:** Bee managed startup/reliability path (`--start-bee` / configurable start command / strict fail-fast on health failure) remains open.
+5. **Task 20:** runbook docs split remains incomplete (`docs/references/speaker-attribution.md` and `docs/references/persistent-streamer-intelligence.md` are not present).
+6. **Task 25:** YOLO-aware phase4 manifest quality hardening not yet implemented (manifest still baseline deterministic windows + speech/chat heuristics).
+7. **Task 26:** preprocessing/runtime environment contract is now documented in this brief; rollout should still validate real WSL image/tag naming in active environments.
 8. **Task 28:** raw VOD extraction path resolution is partially improved but not yet fully canonicalized against phase4 metadata contract.
 
 ---
@@ -184,6 +184,13 @@ PYTHONPATH=. python3 src/synthesis/qwen_clip_analyzer_progressive.py \
   --profile-update-mode propose|auto|off \
   --streamer-id <STREAMER_ID> \
   --profile-root data/streamer_intelligence
+
+# managed Bee startup (optional)
+PYTHONPATH=. python3 src/synthesis/qwen_clip_analyzer_progressive.py \
+  --vod-id <VOD_ID> \
+  --bee-url <BEE_URL> \
+  --start-bee \
+  --bee-start-command "<launch command>"
 ```
 
 ### 8.3 Extract + Upload
@@ -269,7 +276,7 @@ python3 --version
 
 1. Task-20 doc artifacts are still missing (speaker attribution + persistent-intelligence reference docs).
 2. `clip_manifest.json` generation is functional but not yet YOLO-aware ranking parity.
-3. Bee readiness/startup reliability remains partially manual; preflight can timeout and continue.
+3. Bee managed startup is implemented, but launch-command quality and environment-specific startup correctness remain operator-dependent.
 4. Raw VOD path resolution for extraction is improved but not yet fully canonicalized to phase4 metadata.
 5. Runtime/dependency contract is now documented, but real WSL image/tag naming should still be validated during rollout.
 
