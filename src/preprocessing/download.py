@@ -28,7 +28,9 @@ def download_vod(vod_url: str, output_dir: Path) -> dict:
     )
     meta = json.loads(result.stdout)
 
-    vid = meta["id"]
+    # Twitch metadata id is often prefixed (e.g. v2782308109), but downstream
+    # legacy pipeline expects numeric VOD ID from URL for filenames.
+    vid = vod_url.strip("/").split("/")[-1]
 
     # Download audio for Whisper
     subprocess.run(
@@ -40,7 +42,7 @@ def download_vod(vod_url: str, output_dir: Path) -> dict:
 
     # Download low-res video for scene detection (480p)
     subprocess.run(
-        ["yt-dlp", "-f", "bestvideo[height<=480]+bestaudio/best[height<=480]",
+        ["yt-dlp", "-f", "best[height<=480]/best",
          "-o", f"{output_dir}/{vid}_video.%(ext)s", vod_url],
         check=True,
         capture_output=True,

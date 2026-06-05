@@ -54,13 +54,23 @@ from src.synthesis.stage1_discovery import (
 )
 from src.synthesis.stitching import stitch_discoveries
 from src.synthesis.title_dedup import finalize_stage3_candidates
+from src.synthesis.fastpass_triage import (
+    build_triage_chunks,
+    compute_vision_budget,
+    normalize_triage_candidate,
+    select_gemma_frames_for_window,
+    select_vision_shortlist,
+    summarize_gemma_signals_for_triage,
+)
+from src.synthesis.gemma_enrichment import run_gemma_enrichment
 
 # ── Configuration (tweak per VOD / model) ────────────────────────────
 
-DEFAULT_BEE_URL = "http://100.97.240.34:8082"
+DEFAULT_BEE_URL = "http://localhost:8082"
 BEE_URL = os.environ.get("BEE_URL", DEFAULT_BEE_URL)
 START_BEE = False
-BEE_START_COMMAND = os.environ.get("BEE_START_COMMAND")
+DEFAULT_BEE_START_COMMAND = "bash /home/john/twitch-vod-analyzer/scripts/start_bee_prebuilt_wsl.sh"
+BEE_START_COMMAND = os.environ.get("BEE_START_COMMAND", DEFAULT_BEE_START_COMMAND)
 
 
 def bee_models_url() -> str:
@@ -104,6 +114,28 @@ FRAME_INTERVAL_S   = 5       # frames were sampled at this interval
 VOD_MP4_PATH       = os.environ.get("VOD_MP4_PATH",
     f"/home/john/twitch-vod-analyzer/vods/phase4_{VOD_ID}/raw/{VOD_ID}.mp4")
 
+
+FAST_PASS = os.environ.get("FAST_PASS", "0").lower() in {"1", "true", "yes", "on"}
+FAST_PASS_MODE = os.environ.get("FAST_PASS_MODE", "gemma-enriched")
+FAST_PASS_DRY_RUN = os.environ.get("FAST_PASS_DRY_RUN", "0").lower() in {"1", "true", "yes", "on"}
+GEMMA_SMOKE_TEST_ONLY = os.environ.get("GEMMA_SMOKE_TEST_ONLY", "0").lower() in {"1", "true", "yes", "on"}
+GEMMA_URL = os.environ.get("GEMMA_URL", "http://localhost:8084/v1")
+GEMMA_MODEL = os.environ.get("GEMMA_MODEL", "gemma-4-12B-it")
+GEMMA_WINDOW_SECONDS = int(os.environ.get("GEMMA_WINDOW_SECONDS", 30))
+GEMMA_WINDOW_STRIDE_SECONDS = int(os.environ.get("GEMMA_WINDOW_STRIDE_SECONDS", 30))
+GEMMA_MAX_WINDOWS = int(os.environ.get("GEMMA_MAX_WINDOWS", 0))
+GEMMA_FRAMES_PER_WINDOW = int(os.environ.get("GEMMA_FRAMES_PER_WINDOW", 2))
+GEMMA_AUDIO_MAX_SECONDS = int(os.environ.get("GEMMA_AUDIO_MAX_SECONDS", 30))
+GEMMA_RESPONSE_TIMEOUT_SECONDS = int(os.environ.get("GEMMA_RESPONSE_TIMEOUT_SECONDS", 180))
+GEMMA_CONCURRENT_WORKERS = int(os.environ.get("GEMMA_CONCURRENT_WORKERS", 3))
+FAST_PASS_CHUNK_SECONDS = int(os.environ.get("FAST_PASS_CHUNK_SECONDS", 600))
+FAST_PASS_OVERLAP_SECONDS = int(os.environ.get("FAST_PASS_OVERLAP_SECONDS", 60))
+FAST_PASS_MAX_TRIAGE_CANDIDATES = int(os.environ.get("FAST_PASS_MAX_TRIAGE_CANDIDATES", 60))
+FAST_PASS_VISION_RATIO = float(os.environ.get("FAST_PASS_VISION_RATIO", 0.20))
+FAST_PASS_MIN_VISION_CANDIDATES = int(os.environ.get("FAST_PASS_MIN_VISION_CANDIDATES", 25))
+FAST_PASS_MAX_VISION_CANDIDATES = int(os.environ.get("FAST_PASS_MAX_VISION_CANDIDATES", 50))
+FAST_PASS_VISION_FRAMES = int(os.environ.get("FAST_PASS_VISION_FRAMES", 3))
+FAST_PASS_SENTINEL_RATIO = float(os.environ.get("FAST_PASS_SENTINEL_RATIO", 0.05))
 ENABLE_PERSISTENT_INTELLIGENCE = os.environ.get("ENABLE_PERSISTENT_INTELLIGENCE", "0").lower() in {
     "1",
     "true",
@@ -228,23 +260,57 @@ def duration_penalty_seconds(trim_start, trim_end):
         return 2, dur
     return 3, dur
 
-def sample_clip_frames(clip, count=FRAMES_PER_CLIP, frame_spread=FRAME_SPREAD):
+def sample_clip_frames(clip, count=FRAMES_PER_CLIP, frame_spread=FRAME_SPREAD, *, fast_pass=False, suggested_trim_start=None, suggested_trim_end=None):
     """
     Return (frame_paths, timestamps) for a clip window.
     Samples evenly across the clip window for better temporal coverage.
+    In fast-pass mode, prefer start/mid/end around the suggested trim and use the nearest existing frames.
     """
-    start = clip["start"]
-    end   = clip["end"]
-    dur   = end - start
-    
+    start = _as_int(clip.get("start"), 0)
+    end = _as_int(clip.get("end"), start + 1)
+    if end <= start:
+        end = start + 1
+    count = max(1, _as_int(count, FRAMES_PER_CLIP))
+    frame_spread = max(1, _as_int(frame_spread, FRAME_SPREAD))
+
+    if fast_pass:
+        trim_start = _as_int(
+            suggested_trim_start if suggested_trim_start is not None else clip.get("suggested_trim_start"),
+            start,
+        )
+        trim_end = _as_int(
+            suggested_trim_end if suggested_trim_end is not None else clip.get("suggested_trim_end"),
+            end,
+        )
+        if trim_end <= trim_start:
+            trim_start, trim_end = start, end
+        frame_paths = select_gemma_frames_for_window(
+            {
+                "start": trim_start,
+                "end": trim_end,
+            },
+            str(FRAMES_DIR),
+            frames_per_window=count,
+        )
+        sampled = []
+        for fp in frame_paths:
+            stem = Path(fp).stem
+            timestamp = start
+            if stem.startswith("frame_"):
+                try:
+                    timestamp = int(stem.split("_", 1)[1]) * FRAME_INTERVAL_S
+                except (ValueError, IndexError):
+                    timestamp = start
+            sampled.append((fp, timestamp))
+        return sampled
+
+    dur = end - start
     if dur <= 15:
-        # Very short clip – just sample every second
         points = list(range(start + 1, end, max(1, dur // count)))
     else:
-        # Spread count frames evenly across the window
-        step = max(dur // (count + 1), 2)
+        step = max(dur // (count + 1), max(2, frame_spread))
         points = [start + (i + 1) * step for i in range(count)]
-    
+
     paths = []
     for t in points:
         fn = frame_name(t)
@@ -254,6 +320,75 @@ def sample_clip_frames(clip, count=FRAMES_PER_CLIP, frame_spread=FRAME_SPREAD):
         if len(paths) >= count:
             break
     return paths
+
+
+def _build_fast_pass_evidence_block(candidate: dict | None) -> str:
+    candidate = candidate if isinstance(candidate, dict) else {}
+    lines = [
+        f"trigger: {candidate.get('trigger', 'unknown')}",
+        f"payoff: {candidate.get('payoff', 'unknown')}",
+        f"evidence_lines: {candidate.get('evidence_lines', [])}",
+        f"risk_flags: {candidate.get('risk_flags', [])}",
+    ]
+    refs = candidate.get("gemma_annotation_refs") or []
+    if refs:
+        lines.append(f"gemma_annotation_refs: {refs}")
+    gemma_block = candidate.get("gemma_evidence_block")
+    if gemma_block:
+        lines.append(f"gemma_evidence_block: {gemma_block}")
+    return "\n".join(lines)
+
+
+def _fast_pass_text_triage_prompt(*, chunk: dict, gemma_summary: dict, mode: str) -> str:
+    transcript_lines = chunk.get("transcript_lines") or []
+    chat_messages = chunk.get("chat_messages") or []
+    gemma_evidence = gemma_summary.get("evidence_lines") or []
+    return (
+        "You are generating fast-pass text triage candidates for Twitch clip routing. "
+        "Use transcript/chat chunks plus Gemma evidence, but verify/correct Gemma evidence rather than trusting it blindly. "
+        "Return valid JSON only with a top-level object containing a 'candidates' array.\n\n"
+        f"FAST_PASS_MODE={mode}\n"
+        f"CHUNK_START={chunk.get('chunk_start')}\nCHUNK_END={chunk.get('chunk_end')}\n\n"
+        f"TRANSCRIPT_LINES={json.dumps(transcript_lines, ensure_ascii=False)}\n\n"
+        f"CHAT_MESSAGES={json.dumps(chat_messages, ensure_ascii=False)}\n\n"
+        f"GEMMA_EVIDENCE={json.dumps(gemma_evidence, ensure_ascii=False)}\n"
+        f"GEMMA_SUMMARY={json.dumps(gemma_summary, ensure_ascii=False)}\n\n"
+        "Candidate schema: {candidate_id,start,end,suggested_trim_start,suggested_trim_end,narrative_type,trigger,payoff,"
+        "evidence_lines,risk_flags,triage_score,triage_confidence,vision_need,selection_reasons,gemma_annotation_refs}. "
+        "Prefer evidence-grounded candidates and keep the list compact."
+    )
+
+
+def _normalize_fast_pass_triage_candidates(raw_candidates: list[dict], fallback_start: int, fallback_end: int, limit: int) -> list[dict]:
+    normalized = []
+    for candidate in raw_candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        normalized.append(normalize_triage_candidate(candidate, fallback_start, fallback_end))
+    normalized = sorted(normalized, key=lambda c: (-float(c.get("triage_score", 0.0)), -float(c.get("triage_confidence", 0.0)), int(c.get("start", 0)), str(c.get("candidate_id", ""))))
+    return normalized[: max(0, limit)]
+
+
+def _run_fast_pass_text_triage(*, triage_chunks: list[dict], gemma_artifact: dict, mode: str) -> tuple[list[dict], dict]:
+    gemma_windows = gemma_artifact.get("windows", []) if isinstance(gemma_artifact, dict) else []
+    qwen_text_calls = 0
+    candidates: list[dict] = []
+    for chunk in triage_chunks:
+        chunk_start = _as_int(chunk.get("chunk_start"), 0)
+        chunk_end = _as_int(chunk.get("chunk_end"), chunk_start + 1)
+        matching_windows = [w for w in gemma_windows if isinstance(w, dict) and _as_int(w.get("start"), -1) < chunk_end and _as_int(w.get("end"), -1) > chunk_start]
+        gemma_summary = summarize_gemma_signals_for_triage(matching_windows)
+        gemma_summary["annotation_refs"] = [w.get("window_id") for w in matching_windows if w.get("window_id")]
+        prompt = _fast_pass_text_triage_prompt(chunk=chunk, gemma_summary=gemma_summary, mode=mode)
+        payload = {"model": QWEN_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": 4096, "temperature": 0.1}
+        qwen_text_calls += 1
+        response = qwen_call(payload)
+        raw_candidates = response.get("candidates", []) if isinstance(response, dict) else []
+        candidates.extend(_normalize_fast_pass_triage_candidates(raw_candidates, chunk_start, chunk_end, FAST_PASS_MAX_TRIAGE_CANDIDATES))
+    candidates = sorted(candidates, key=lambda c: (-float(c.get("triage_score", 0.0)), -float(c.get("triage_confidence", 0.0)), int(c.get("start", 0)), str(c.get("candidate_id", ""))))
+    candidates = candidates[:FAST_PASS_MAX_TRIAGE_CANDIDATES]
+    stats = {"qwen_text_calls": qwen_text_calls, "mode": mode, "triage_candidate_count": len(candidates)}
+    return candidates, stats
 
 def sample_extra_frames(clip, count=8):
     """
@@ -434,26 +569,14 @@ def run_audio_phase(clips, all_results, fusion, manifest, speaker_attribution=No
             r["analysis"]["audio_extraction_time"] = raw_audio.get("extraction_time_seconds")
             r["analysis"]["audio_inference_time"] = raw_audio.get("inference_time_seconds")
             r["analysis"]["audio_structured"] = normalize_audio_result(raw_audio)
-    log("  Starting Bee server...")
+    log(f"  Starting Bee server via: {BEE_START_COMMAND}")
     # Kill any existing Bee/llama-server process
     subprocess.run("pkill -f llama-server 2>/dev/null; sleep 2", shell=True, capture_output=True, timeout=10)
-    # Start Bee
-    bee_cmd = (
-        "nohup /home/john/beellama.cpp/build/bin/llama-server "
-        "-m /home/john/models/bee-qwen36-27b/Qwen3.6-27B-Q5_K_S.gguf "
-        "--mmproj /home/john/models/bee-qwen36-27b/mmproj-BF16.gguf "
-        "--spec-draft-model /home/john/models/bee-qwen36-27b/dflash-draft-3.6-q4_k_m.gguf "
-        "--spec-type dflash --spec-dflash-cross-ctx 1024 "
-        "--host 0.0.0.0 --port 8082 -np 1 --kv-unified -ngl all --spec-draft-ngl all "
-        "-b 2048 -ub 512 --ctx-size 200000 "
-        "--cache-type-k turbo4 --cache-type-v turbo3_tcq "
-        "--flash-attn on --cache-ram 0 --jinja --no-mmap --mlock "
-        "--reasoning on "
-        '--chat-template-kwargs \'{"preserve_thinking":true}\' '
-        "--temp 0.6 --top-k 20 --min-p 0.0 "
-        "> /tmp/bee_server.log 2>&1 &"
-    )
-    subprocess.run(bee_cmd, shell=True, capture_output=True, timeout=10)
+    bee_start = subprocess.run(BEE_START_COMMAND, shell=True, capture_output=True, text=True, timeout=30)
+    if bee_start.returncode != 0:
+        log(f"  WARN: Bee start command returned {bee_start.returncode}")
+        if bee_start.stderr:
+            log(f"  stderr: {bee_start.stderr[:500]}")
 
     # Step 9: Wait for Bee API to be ready
     log("  Waiting for Bee API to be ready (up to ~3 min cold start)...")
@@ -508,14 +631,6 @@ BAD:
 
 ANALYSIS_PROMPT = """You are a Twitch clip analyst. I'll show you frames from a {clip_title} segment ({start}s - {end}s).
 
-Transcript context: {transcript}
-Chat messages:
-{chat_messages}
-YOLO detections: {yolo_objects}
-
-PREVIOUS BATCH CONTEXT (what's been analysed so far in this VOD):
-{batch_context}
-
 IMPORTANT CONTEXT FOR UNDERSTANDING THE STREAM:
 - Chat messages FROM the streamer account (username "asyajade") are auto-bot responses like "has redeemed their daily pickle" - the streamer reads these aloud as donation/sub alerts.
 - When you see a viewer chat message, then the SAME or closely similar text appears in the TRANSCRIPT spoken by the streamer, the streamer is READING that chat message aloud (not speaking from personal experience). The story is the CHATTER'S, not the streamer's. Attribute correctly: e.g. "Streamer reads a chat message about..." not "Streamer says she..."
@@ -537,6 +652,16 @@ SPEAKER-FRAMING INFERENCE RULES:
 - Do NOT assume deterministic speaker penalties/hard gates exist in Python. Handle this by inference/reframing in your analysis.
 
 {phase1_title_examples}
+
+CLIP-SPECIFIC CONTEXT:
+Transcript context: {transcript}
+Chat messages:
+{chat_messages}
+YOLO detections: {yolo_objects}
+{fast_pass_evidence_context}
+
+PREVIOUS BATCH CONTEXT (what's been analysed so far in this VOD):
+{batch_context}
 
 Analyse these specific frames and return valid JSON only:
 {{
@@ -639,9 +764,7 @@ CLIP CRITICISM RULE (Stage 1):
 
 IMPORTANT: Stage 1 is discovery-only. Do not perform final title optimization or final platform recommendation decisions here.
 
-Focus on narrative discovery quality and trim precision in this stage.
-
-Previous batch context: {batch_context}"""
+Focus on narrative discovery quality and trim precision in this stage."""
 
 PROVISIONAL_SYNTHESIS_PROMPT = """You have just analysed {total_clips} clip candidates from a Twitch VOD titled "{vod_title}" by {streamer}.
 
@@ -907,6 +1030,176 @@ def build_analysis_log_entry(r):
         )
     return entry
 
+
+
+def _build_fast_pass_candidate(clip: dict, gemma_summary: dict | None = None) -> dict:
+    gemma_summary = gemma_summary or {}
+    evidence_lines = [f"[{clip['start']}s] clip window {clip['start']}-{clip['end']}s"]
+    if gemma_summary.get("evidence_lines"):
+        evidence_lines.extend(gemma_summary["evidence_lines"][:3])
+    if gemma_summary.get("has_audio_alert"):
+        evidence_lines.append("gemma_audio_alert")
+    if gemma_summary.get("has_visual_reaction"):
+        evidence_lines.append("gemma_visual_reaction")
+    if gemma_summary.get("streamer_led_likelihood", 0.0) >= 0.6:
+        evidence_lines.append("streamer_led_likelihood_high")
+    if gemma_summary.get("transactional_alert_likelihood", 0.0) >= 0.6:
+        evidence_lines.append("transactional_alert_likelihood_high")
+    triage_score = min(
+        10.0,
+        1.0
+        + (2.5 if gemma_summary.get("has_audio_alert") else 0.0)
+        + (2.0 if gemma_summary.get("has_visual_reaction") else 0.0)
+        + 2.0 * float(gemma_summary.get("streamer_led_likelihood", 0.0) or 0.0)
+        + 1.5 * float(gemma_summary.get("transactional_alert_likelihood", 0.0) or 0.0),
+    )
+    triage_confidence = min(1.0, 0.35 + 0.1 * len(gemma_summary.get("evidence_lines", []) or []))
+    candidate = normalize_triage_candidate(
+        {
+            "candidate_id": f"triage_{clip['start']}",
+            "start": clip["start"],
+            "end": clip["end"],
+            "suggested_trim_start": clip.get("suggested_trim_start", clip["start"]),
+            "suggested_trim_end": clip.get("suggested_trim_end", clip["end"]),
+            "narrative_type": clip.get("narrative_type", "other"),
+            "trigger": clip.get("trigger", "What starts the moment"),
+            "payoff": clip.get("payoff", "What resolves or lands"),
+            "evidence_lines": evidence_lines,
+            "risk_flags": list(clip.get("risk_flags", [])) + [flag for flag in gemma_summary.get("risk_counts", {}).keys()],
+            "triage_score": triage_score,
+            "triage_confidence": triage_confidence,
+            "vision_need": "critical" if gemma_summary.get("has_audio_alert") or gemma_summary.get("has_visual_reaction") else "verify_expression",
+            "selection_reasons": ["text_top_rank"],
+        },
+        fallback_start=clip["start"],
+        fallback_end=clip["end"],
+    )
+    candidate["gemma_annotation_refs"] = list(gemma_summary.get("annotation_refs", []) or [])
+    candidate["selection_reasons"] = ["text_top_rank"] + (["gemma_audio_alert_or_laughter"] if gemma_summary.get("has_audio_alert") else []) + (["gemma_visual_reaction"] if gemma_summary.get("has_visual_reaction") else [])
+    return candidate
+
+
+def _build_fast_pass_artifacts(*, fusion: dict, manifest: dict, clips: list[dict], phase4_dir: Path, speaker_attribution: dict | None, dry_run: bool) -> dict:
+    started_at = time.time()
+    triage_chunks = build_triage_chunks(
+        fusion.get("transcript", {}).get("segments", []),
+        fusion.get("chat", {}).get("messages", []),
+        vod_start=min((int(c.get("start", 0)) for c in clips), default=0),
+        vod_end=max((int(c.get("end", 0)) for c in clips), default=1),
+        chunk_seconds=FAST_PASS_CHUNK_SECONDS,
+        overlap_seconds=FAST_PASS_OVERLAP_SECONDS,
+    )
+    for chunk in triage_chunks:
+        chunk["signal_summary"] = chunk.get("signal_summary") or {}
+
+    gemma_result = None
+    if FAST_PASS_MODE == "text-only":
+        gemma_artifact = {
+            "backend": "disabled",
+            "windows": [],
+            "stats": {
+                "total_windows": 0,
+                "successful_windows": 0,
+                "failed_windows": 0,
+                "wall_clock_seconds": 0.0,
+            },
+        }
+    else:
+        gemma_result = run_gemma_enrichment(
+            base_url=GEMMA_URL,
+            model=GEMMA_MODEL,
+            phase4_dir=str(phase4_dir),
+            fusion={**fusion, "triage_chunks": triage_chunks},
+            manifest=manifest,
+            frames_dir=str(phase4_dir / "frames"),
+            raw_vod_path=VOD_MP4_PATH,
+            window_seconds=GEMMA_WINDOW_SECONDS,
+            stride_seconds=GEMMA_WINDOW_STRIDE_SECONDS,
+            frames_per_window=GEMMA_FRAMES_PER_WINDOW,
+            max_windows=GEMMA_MAX_WINDOWS,
+            timeout=GEMMA_RESPONSE_TIMEOUT_SECONDS,
+            concurrent_workers=GEMMA_CONCURRENT_WORKERS,
+        )
+        gemma_artifact = gemma_result["artifact"]
+
+    triage_candidates, triage_stats = _run_fast_pass_text_triage(
+        triage_chunks=triage_chunks,
+        gemma_artifact=gemma_artifact,
+        mode=FAST_PASS_MODE,
+    )
+
+    if not triage_candidates and FAST_PASS_MODE != "text-only":
+        gemma_windows = gemma_artifact.get("windows", []) if isinstance(gemma_artifact, dict) else []
+        for clip in clips:
+            matching = [
+                w
+                for w in gemma_windows
+                if isinstance(w, dict)
+                and _as_int(w.get("start"), -1) <= _as_int(clip.get("end"), 0)
+                and _as_int(w.get("end"), -1) >= _as_int(clip.get("start"), 0)
+            ]
+            gemma_summary = summarize_gemma_signals_for_triage(matching)
+            gemma_summary["annotation_refs"] = [w.get("window_id") for w in matching if w.get("window_id")]
+            triage_candidates.append(_build_fast_pass_candidate(clip, gemma_summary))
+        triage_stats["fallback_used"] = True
+
+    triage_candidates = sorted(
+        triage_candidates,
+        key=lambda c: (-float(c.get("triage_score", 0.0)), -float(c.get("triage_confidence", 0.0)), int(c.get("start", 0)), str(c.get("candidate_id", ""))),
+    )[:FAST_PASS_MAX_TRIAGE_CANDIDATES]
+    text_triage_path = phase4_dir / "text_triage_candidates.json"
+    text_triage_payload = {"mode": FAST_PASS_MODE, "candidates": triage_candidates}
+    text_triage_path.write_text(json.dumps(text_triage_payload, indent=2))
+
+    vision_budget = compute_vision_budget(len(triage_candidates), FAST_PASS_VISION_RATIO, FAST_PASS_MIN_VISION_CANDIDATES, FAST_PASS_MAX_VISION_CANDIDATES)
+    shortlist = select_vision_shortlist(triage_candidates, manifest.get("clips", []), vision_budget=vision_budget, sentinel_ratio=FAST_PASS_SENTINEL_RATIO)
+    shortlist_path = phase4_dir / "vision_shortlist.json"
+    shortlist_payload = {"mode": FAST_PASS_MODE, "shortlist": shortlist}
+    shortlist_path.write_text(json.dumps(shortlist_payload, indent=2))
+
+    selection_reason_counts = {}
+    for candidate in triage_candidates:
+        for reason in candidate.get("selection_reasons") or []:
+            selection_reason_counts[reason] = selection_reason_counts.get(reason, 0) + 1
+
+    gemma_stats = gemma_artifact.get("stats", {}) if isinstance(gemma_artifact, dict) else {}
+    gemma_windows_count = len(gemma_artifact.get("windows", []) if isinstance(gemma_artifact, dict) else [])
+
+    return {
+        "enabled": True,
+        "mode": FAST_PASS_MODE,
+        "dry_run": dry_run,
+        "qwen_text_calls": triage_stats.get("qwen_text_calls", 0),
+        "qwen_vision_calls": 0,
+        "qwen_images_sent": 0,
+        "escalated_frame_count": 0,
+        "selection_reason_counts": selection_reason_counts,
+        "gemma": {
+            "artifact_path": gemma_result["artifact_path"] if gemma_result else "",
+            "stats": gemma_stats,
+            "backend": gemma_artifact.get("backend", "llama_cpp") if isinstance(gemma_artifact, dict) else "llama_cpp",
+            "window_count": gemma_windows_count,
+            "failure_count": int(gemma_stats.get("failed_windows", 0)),
+        },
+        "text_triage_path": str(text_triage_path),
+        "vision_shortlist_path": str(shortlist_path),
+        "artifact_paths": {
+            "gemma_annotations": str(gemma_result["artifact_path"]) if gemma_result else "",
+            "text_triage": str(text_triage_path),
+            "vision_shortlist": str(shortlist_path),
+        },
+        "triage_candidates": triage_candidates,
+        "vision_shortlist": shortlist,
+        "gemma_artifact": gemma_artifact,
+        "summary": {
+            **(gemma_result.get("summary", {}) if gemma_result else {}),
+            "triage_candidate_count": len(triage_candidates),
+            "vision_shortlist_count": len(shortlist),
+        },
+        "wall_clock_seconds": round(time.time() - started_at, 3),
+    }
+
+
 def run():
     log(f"Loading data for VOD {VOD_ID} ...")
 
@@ -950,6 +1243,39 @@ def run():
         sys.exit(1)
 
     clips.sort(key=lambda c: c["start"])
+    original_clip_count = len(clips)
+
+    fast_pass_state = None
+    fast_pass_run_started_at = None
+    if FAST_PASS or FAST_PASS_DRY_RUN or GEMMA_SMOKE_TEST_ONLY:
+        fast_pass_run_started_at = time.time()
+        fast_pass_state = _build_fast_pass_artifacts(
+            fusion=fusion,
+            manifest=manifest,
+            clips=clips,
+            phase4_dir=VOD_DIR,
+            speaker_attribution=speaker_attribution,
+            dry_run=FAST_PASS_DRY_RUN or GEMMA_SMOKE_TEST_ONLY,
+        )
+        if FAST_PASS_DRY_RUN or GEMMA_SMOKE_TEST_ONLY:
+            log(f"Fast-pass dry-run complete: {fast_pass_state['gemma']['artifact_path']}")
+            log(f"  text triage: {fast_pass_state['text_triage_path']}")
+            log(f"  vision shortlist: {fast_pass_state['vision_shortlist_path']}")
+            output = {
+                "vod_id": VOD_ID,
+                "pipeline": "progressive-chunking-v2",
+                "fast_pass": {
+                    **fast_pass_state,
+                    "gemma_backend": fast_pass_state['gemma']['backend'],
+                },
+            }
+            OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(OUTPUT_PATH, "w") as f:
+                json.dump(output, f, indent=2)
+            log(f"Fast-pass dry-run results saved to {OUTPUT_PATH}")
+            sys.exit(0)
+        clips = list(fast_pass_state['vision_shortlist'])
+        log(f"Fast-pass enabled: reduced clips from {original_clip_count} to {len(clips)}")
 
     streamer_profile_context = (
         "STREAMER PROFILE CONTEXT (evidence-backed, advisory): unavailable for this run."
@@ -1005,6 +1331,11 @@ def run():
     batches = [clips[i:i+CLIPS_PER_BATCH] for i in range(0, total, CLIPS_PER_BATCH)]
     log(f"Found {total} clips in {len(batches)} batch(es) of {CLIPS_PER_BATCH}")
 
+    if fast_pass_state:
+        fast_pass_state["qwen_vision_calls"] = 0
+        fast_pass_state["qwen_images_sent"] = 0
+        fast_pass_state["escalated_frame_count"] = 0
+
     for batch_idx, batch in enumerate(batches):
         log(f"\n{'='*60}")
         log(f"BATCH {batch_idx + 1}/{len(batches)} — clips {batch[0]['start']}s - {batch[-1]['end']}s")
@@ -1012,12 +1343,26 @@ def run():
         # Build the multimodal payload
         messages = []
         user_content = []
+        batch_image_count = 0
 
         for clip in batch:
             title = clip.get("title", f"clip at {clip['start']}s")
             transcript, chat_act = context_for_time(clip["start"])
             yolo_objs = clip.get("objects_detected", [])
-            frame_samples = sample_clip_frames(clip)
+            frame_samples = sample_clip_frames(
+                clip,
+                count=FAST_PASS_VISION_FRAMES if FAST_PASS else FRAMES_PER_CLIP,
+                fast_pass=FAST_PASS,
+                suggested_trim_start=clip.get("suggested_trim_start"),
+                suggested_trim_end=clip.get("suggested_trim_end"),
+            )
+            fast_pass_evidence_context = ""
+            if FAST_PASS:
+                evidence_block = _build_fast_pass_evidence_block(clip)
+                fast_pass_evidence_context = (
+                    "FAST-PASS TRIAGE EVIDENCE (advisory only — verify/correct this evidence rather than trusting it blindly):\n"
+                    f"{evidence_block}"
+                )
 
             prompt = ANALYSIS_PROMPT.format(
                 clip_title=title,
@@ -1025,6 +1370,7 @@ def run():
                 transcript=transcript,
                 chat_messages=chat_act,
                 yolo_objects=", ".join(yolo_objs) if yolo_objs else "none",
+                fast_pass_evidence_context=fast_pass_evidence_context,
                 batch_context=batch_context,
                 streamer_profile_context=streamer_profile_context,
                 phase1_title_research_summary=PHASE1_TITLE_RESEARCH_SUMMARY,
@@ -1039,6 +1385,7 @@ def run():
                 try:
                     uri = encode_image(fp)
                     user_content.append({"type": "image_url", "image_url": {"url": uri}})
+                    batch_image_count += 1
                 except Exception as e:
                     log(f"  WARN: failed to encode {fp}: {e}")
 
@@ -1051,7 +1398,10 @@ def run():
             "temperature": 0.15,
         }
 
-        log(f"  Sending {len(user_content)-len(batch)} images to Qwen ...")
+        log(f"  Sending {batch_image_count} images to Qwen ...")
+        if fast_pass_state:
+            fast_pass_state["qwen_vision_calls"] += 1
+            fast_pass_state["qwen_images_sent"] += batch_image_count
         t0 = time.time()
         analysis = qwen_call(payload)
         elapsed = time.time() - t0
@@ -1327,6 +1677,11 @@ def run():
                 "temperature": 0.15,
             }
 
+            if fast_pass_state:
+                fast_pass_state["qwen_vision_calls"] += 1
+                fast_pass_state["qwen_images_sent"] += len(extra_frames)
+                fast_pass_state["escalated_frame_count"] += len(extra_frames)
+
             t0 = time.time()
             review = qwen_call(payload)
             elapsed = time.time() - t0
@@ -1479,6 +1834,9 @@ def run():
                 if qc.get(field):
                     ir[field] = qc[field]
 
+    if fast_pass_state and fast_pass_run_started_at is not None:
+        fast_pass_state["wall_clock_seconds"] = round(time.time() - fast_pass_run_started_at, 3)
+
     # ── Save ──
     output = {
         "vod_id": VOD_ID,
@@ -1495,6 +1853,7 @@ def run():
         "rejected_clips": rejected_clips,
         "provisional_ranking": provisional,
         "final_ranking": final_synthesis,
+        "fast_pass": fast_pass_state if fast_pass_state else {"enabled": False},
     }
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -1825,6 +2184,26 @@ if __name__ == "__main__":
         default=PROFILE_UPDATE_MODE,
         help="Persistent profile update mode (propose, auto, off)",
     )
+    parser.add_argument("--fast-pass", action="store_true", help="Enable Gemma-enriched fast-pass Stage 1 routing")
+    parser.add_argument("--fast-pass-mode", choices=["gemma-enriched", "text-only"], default=FAST_PASS_MODE)
+    parser.add_argument("--fast-pass-dry-run", action="store_true", help="Run Gemma/text shortlist generation and exit before Stage 1 vision")
+    parser.add_argument("--gemma-smoke-test-only", action="store_true", help="Alias for a Gemma fast-pass dry run")
+    parser.add_argument("--gemma-url", default=GEMMA_URL)
+    parser.add_argument("--gemma-model", default=GEMMA_MODEL)
+    parser.add_argument("--gemma-window-seconds", type=int, default=GEMMA_WINDOW_SECONDS)
+    parser.add_argument("--gemma-window-stride-seconds", type=int, default=GEMMA_WINDOW_STRIDE_SECONDS)
+    parser.add_argument("--gemma-max-windows", type=int, default=GEMMA_MAX_WINDOWS)
+    parser.add_argument("--gemma-frames-per-window", type=int, default=GEMMA_FRAMES_PER_WINDOW)
+    parser.add_argument("--gemma-audio-max-seconds", type=int, default=GEMMA_AUDIO_MAX_SECONDS)
+    parser.add_argument("--gemma-response-timeout-seconds", type=int, default=GEMMA_RESPONSE_TIMEOUT_SECONDS)
+    parser.add_argument("--fast-pass-chunk-seconds", type=int, default=FAST_PASS_CHUNK_SECONDS)
+    parser.add_argument("--fast-pass-overlap-seconds", type=int, default=FAST_PASS_OVERLAP_SECONDS)
+    parser.add_argument("--fast-pass-max-triage-candidates", type=int, default=FAST_PASS_MAX_TRIAGE_CANDIDATES)
+    parser.add_argument("--fast-pass-vision-ratio", type=float, default=FAST_PASS_VISION_RATIO)
+    parser.add_argument("--fast-pass-min-vision-candidates", type=int, default=FAST_PASS_MIN_VISION_CANDIDATES)
+    parser.add_argument("--fast-pass-max-vision-candidates", type=int, default=FAST_PASS_MAX_VISION_CANDIDATES)
+    parser.add_argument("--fast-pass-vision-frames", type=int, default=FAST_PASS_VISION_FRAMES)
+    parser.add_argument("--fast-pass-sentinel-ratio", type=float, default=FAST_PASS_SENTINEL_RATIO)
 
     args, _ = parser.parse_known_args()
     VOD_ID = args.vod_id
@@ -1832,14 +2211,12 @@ if __name__ == "__main__":
     START_BEE = args.start_bee
     BEE_START_COMMAND = args.bee_start_command
     # Recompute VOD-dependent paths now that VOD_ID is known.
-    VOD_DIR            = Path(os.environ.get("VOD_DIR",
-                             f"/home/john/twitch-vod-analyzer/vods/phase4_{VOD_ID}"))
-    FRAMES_DIR         = VOD_DIR / "frames"
-    FUSION_PATH        = VOD_DIR / f"fusion_result_{VOD_ID}.json"
+    VOD_DIR = Path(os.environ.get("VOD_DIR", f"/home/john/twitch-vod-analyzer/vods/phase4_{VOD_ID}"))
+    FRAMES_DIR = VOD_DIR / "frames"
+    FUSION_PATH = VOD_DIR / f"fusion_result_{VOD_ID}.json"
     CLIP_MANIFEST_PATH = VOD_DIR / "clip_manifest.json"
-    OUTPUT_PATH        = VOD_DIR / "qwen_vision_progressive.json"
-    VOD_MP4_PATH       = os.environ.get("VOD_MP4_PATH",
-                         f"/home/john/twitch-vod-analyzer/vods/phase4_{VOD_ID}/raw/{VOD_ID}.mp4")
+    OUTPUT_PATH = VOD_DIR / "qwen_vision_progressive.json"
+    VOD_MP4_PATH = os.environ.get("VOD_MP4_PATH", f"/home/john/twitch-vod-analyzer/vods/phase4_{VOD_ID}/raw/{VOD_ID}.mp4")
     if args.skip_audio:
         ENABLE_AUDIO = False
     AUDIO_CLIPS_TO_PROCESS = args.top_clips
@@ -1859,5 +2236,26 @@ if __name__ == "__main__":
         UPDATE_STREAMER_PROFILE = True
         ENABLE_PERSISTENT_INTELLIGENCE = True
     PROFILE_UPDATE_MODE = args.profile_update_mode
+
+    FAST_PASS = args.fast_pass
+    FAST_PASS_MODE = args.fast_pass_mode
+    FAST_PASS_DRY_RUN = args.fast_pass_dry_run
+    GEMMA_SMOKE_TEST_ONLY = args.gemma_smoke_test_only
+    GEMMA_URL = args.gemma_url
+    GEMMA_MODEL = args.gemma_model
+    GEMMA_WINDOW_SECONDS = args.gemma_window_seconds
+    GEMMA_WINDOW_STRIDE_SECONDS = args.gemma_window_stride_seconds
+    GEMMA_MAX_WINDOWS = args.gemma_max_windows
+    GEMMA_FRAMES_PER_WINDOW = args.gemma_frames_per_window
+    GEMMA_AUDIO_MAX_SECONDS = args.gemma_audio_max_seconds
+    GEMMA_RESPONSE_TIMEOUT_SECONDS = args.gemma_response_timeout_seconds
+    FAST_PASS_CHUNK_SECONDS = args.fast_pass_chunk_seconds
+    FAST_PASS_OVERLAP_SECONDS = args.fast_pass_overlap_seconds
+    FAST_PASS_MAX_TRIAGE_CANDIDATES = args.fast_pass_max_triage_candidates
+    FAST_PASS_VISION_RATIO = args.fast_pass_vision_ratio
+    FAST_PASS_MIN_VISION_CANDIDATES = args.fast_pass_min_vision_candidates
+    FAST_PASS_MAX_VISION_CANDIDATES = args.fast_pass_max_vision_candidates
+    FAST_PASS_VISION_FRAMES = args.fast_pass_vision_frames
+    FAST_PASS_SENTINEL_RATIO = args.fast_pass_sentinel_ratio
 
     run()

@@ -178,9 +178,9 @@ def _aggregate_cluster(cluster: List[Dict], stitched_idx: int, merge_reasons: Op
 
     stitched = {
         "stitched_id": f"stitched_{min(starts)}_{max(ends)}_{stitched_idx}",
-        # Use best clip's boundaries so scoring sees a tight, relevant window
-        "start": _as_int(best.get("start"), min(starts)),
-        "end": _as_int(best.get("end"), max(ends)),
+        # Preserve the full stitched span while still carrying the best clip's narrative content.
+        "start": min(starts),
+        "end": max(ends),
         "narrative_type": narrative_type,
         "trigger": trigger,
         "payoff": payoff,

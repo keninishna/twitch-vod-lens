@@ -86,7 +86,7 @@ def run_pipeline(
                 url=url,
                 output_dir=workdir,
                 audio_only=False,
-                format_spec="bestvideo[height<=720]/bestvideo",
+                format_spec="best[height<=720]/best",
             )
             if video_path.suffix != '.mp4':
                 # Re-download with explicit merge

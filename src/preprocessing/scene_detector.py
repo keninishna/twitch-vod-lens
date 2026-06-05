@@ -1,19 +1,20 @@
 """
 VOD Lens — Scene Detection Module
 
-Detects scene changes in a VOD using PySceneDetect content-aware
-analysis. Downscales to 480p for performance on long VODs.
+Detects scene changes in a VOD using the PySceneDetect Python API.
+This avoids depending on the `scenedetect` CLI being available on PATH,
+which is brittle on user-managed WSL installs where the package may be
+installed but only exposed under ~/.local/bin.
 """
 
 from __future__ import annotations
 
-import json
 import subprocess
 import time
 from pathlib import Path
 from typing import Optional
 
-from src.preprocessing.types import SceneBoundary, SceneClip
+from src.preprocessing.types import SceneClip
 
 
 def detect_scenes(
@@ -28,100 +29,85 @@ def detect_scenes(
     Args:
         video_path: Path to video file (MP4)
         threshold: Detection threshold (lower = more sensitive, default 12.0)
-        downscale: Downscale resolution for faster processing (None = full res)
-        method: Detection method ("content" for content-aware, "adaptive" for adaptive)
+        downscale: Kept for compatibility. When truthy, enables PySceneDetect's
+            automatic downscaling. When None/False, disables auto-downscale.
+        method: Detection method ("content" or "adaptive")
 
     Returns:
         List of SceneClip objects between detected boundaries
 
     Raises:
         FileNotFoundError: If video file doesn't exist
+        ImportError: If scenedetect is not installed
         RuntimeError: If detection fails
     """
     if not video_path.exists():
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
+    try:
+        from scenedetect import AdaptiveDetector, ContentDetector, SceneManager, open_video
+    except ImportError as exc:
+        raise ImportError(
+            "PySceneDetect is required. Install: pip install scenedetect"
+        ) from exc
+
     video_path = Path(video_path)
     start_time = time.time()
 
-    # Use scenedetect CLI
-    stats_path = video_path.parent / "scenes_stats.csv"
-    scene_list_path = video_path.parent / "scenes.json"
+    try:
+        video = open_video(str(video_path))
+        scene_manager = SceneManager()
 
-    cmd = [
-        "scenedetect",
-        "--input", str(video_path),
-        "--output", str(video_path.parent),
-    ]
+        # `downscale` used to be passed to the CLI as a hint like "480p".
+        # In the Python API we preserve the intent by toggling PySceneDetect's
+        # automatic downscaling instead of requiring any external binary/path setup.
+        if hasattr(scene_manager, "auto_downscale"):
+            scene_manager.auto_downscale = bool(downscale)
+        if not downscale and hasattr(scene_manager, "downscale"):
+            scene_manager.downscale = 1
 
-    if downscale:
-        cmd.extend(["--downscale", downscale])
+        if method == "adaptive":
+            detector = AdaptiveDetector(adaptive_threshold=threshold)
+        else:
+            detector = ContentDetector(threshold=threshold)
 
-    if method == "content":
-        cmd.extend(["detect-content", "--threshold", str(threshold)])
-    elif method == "adaptive":
-        cmd.extend(["detect-adaptive", "--threshold", str(threshold)])
-    else:
-        cmd.extend(["detect-content", "--threshold", str(threshold)])
+        scene_manager.add_detector(detector)
+        scene_manager.detect_scenes(video=video, show_progress=False)
+        scene_list = scene_manager.get_scene_list(start_in_scene=True)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"PySceneDetect failed: {exc}") from exc
+    finally:
+        # Backends vary; close/release when available.
+        try:
+            if "video" in locals():
+                if hasattr(video, "release"):
+                    video.release()
+                elif hasattr(video, "reset"):
+                    video.reset()
+        except Exception:
+            pass
 
-    cmd.extend([
-        "list-scenes",
-        "--output", str(video_path.parent),
-        "--filename", "scenes",
-    ])
-
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"PySceneDetect failed (exit {result.returncode}): {result.stderr[:500]}"
-        )
-
-    # Parse the scene list CSV/JSON output
-    scenes = _parse_scene_list(video_path.parent)
-
-    # Clean up stats file
-    stats_path.unlink(missing_ok=True)
+    scenes = _scene_list_to_clips(scene_list)
 
     elapsed = time.time() - start_time
-
+    _ = elapsed  # retained for parity/debuggability if timing logs are added later
     return scenes
 
 
-def _parse_scene_list(output_dir: Path) -> list[SceneClip]:
-    """Parse scene list from scenedetect output."""
-    # Try scene list CSV first
-    csv_files = list(output_dir.glob("*scenes*.csv"))
-    if csv_files:
-        return _parse_csv_scenes(csv_files[0])
-
-    # Fall back to parsing scenedetect stdout
-    return []
-
-
-def _parse_csv_scenes(csv_path: Path) -> list[SceneClip]:
-    """Parse scene list CSV into SceneClip objects."""
+def _scene_list_to_clips(scene_list) -> list[SceneClip]:
+    """Convert PySceneDetect scene tuples into SceneClip contracts."""
     scenes: list[SceneClip] = []
-    import csv
-
-    with open(csv_path, newline="") as f:
-        reader = csv.DictReader(f)
-        for i, row in enumerate(reader):
-            try:
-                start = float(row.get("Start Timecode (seconds)", row.get("Start (s)", 0)))
-                end = float(row.get("End Timecode (seconds)", row.get("End (s)", 0)))
-            except (ValueError, TypeError):
-                continue
-
-            scenes.append(
-                SceneClip(
-                    index=i,
-                    start=start,
-                    end=end,
-                    duration=end - start,
-                )
+    for i, (start, end) in enumerate(scene_list):
+        start_s = float(start.get_seconds())
+        end_s = float(end.get_seconds())
+        scenes.append(
+            SceneClip(
+                index=i,
+                start=start_s,
+                end=end_s,
+                duration=max(0.0, end_s - start_s),
             )
-
+        )
     return scenes
 
 

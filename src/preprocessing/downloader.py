@@ -46,7 +46,9 @@ def download_vod(
     elif audio_only:
         fmt = "bestaudio/best"
     else:
-        fmt = "bestvideo+bestaudio"
+        # Twitch VODs often expose muxed ladder formats (e.g. 720p60-1) rather than
+        # separate bestvideo+bestaudio tracks; requesting separate tracks can fail.
+        fmt = "best[height<=720]/best"
 
     output_template = str(output_dir / "vod_input.%(ext)s")
 
