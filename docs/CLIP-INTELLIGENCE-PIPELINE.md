@@ -42,10 +42,10 @@ Post RMS fallback only for unresolved full 120s windows, then mandatory rescorin
 Post+ Optional profile update proposal/auto-merge (mode-gated)
 ```
 
-**Fast-pass status (June 05):** Validated end-to-end on real VOD `2788478641` (197 clips, ~6.5 hr VOD). Gemma enrichment processed 262 windows, ~48 min sequential. Text triage, vision shortlist, and Stage 1–3 produced a final ranking with 10 selected clips + 14 rejected. Concurrency (`-np 3` + `GEMMA_CONCURRENT_WORKERS=3`) added to reduce Gemma enrichment wall time ~3×.
+**Fast-pass status (June 05):** Validated end-to-end on real VOD `2788478641` (197 clips, ~6.5 hr VOD). Gemma enrichment processed 262 windows, ~48 min sequential with `response_format=json_object` — 201/262 returned empty responses due to guided JSON grammar conflicts with multimodal input. Switched to raw natural-language observations + deterministic Python parser (`parse_gemma_raw_output`), eliminating parse failures entirely since every window produces usable annotations regardless of Gemma output format. Concurrency (`-np 3` + `GEMMA_CONCURRENT_WORKERS=3`) added to reduce Gemma enrichment wall time ~3×.
 
 **Runtime stack:**
-- **Gemma 4 12B** → upstream `llama.cpp` / `build_compat` server on port **8084** (`-np 3`)
+- **Gemma 4 12B** → upstream `llama.cpp` / `build_compat` server on port **8084** using **Unsloth QAT GGUF** (`gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` + `mmproj-F16.gguf`) with `-np 3`
 - **Qwen 3.6 27B DFlash** → BeeLlama v0.3.1 prebuilt CUDA 13.1 on port **8082** (GPU mmproj, `--reasoning on`, `--chat-template-kwargs '{"preserve_thinking":true}'`)
 - Both run on WSL2 / RTX 5090, fit in ~32 GiB VRAM
 
@@ -161,7 +161,7 @@ Persistent intelligence:
 - `src/synthesis/scoring.py`
 - `src/synthesis/title_dedup.py`
 - `src/synthesis/clip_context.py`
-- `src/synthesis/gemma_enrichment.py` (Gemma multimodal enrichment, concurrent workers)
+- `src/synthesis/gemma_enrichment.py` (Gemma multimodal enrichment, raw text → deterministic parser via `parse_gemma_raw_output()`, concurrent workers)
 - `src/synthesis/fastpass_triage.py`
 - `src/synthesis/bee_server.py`
 - `src/synthesis/schemas/clip_intelligence_stages.py`
@@ -230,15 +230,22 @@ GEMMA_CONCURRENT_WORKERS=1 PYTHONPATH=. python3 src/synthesis/qwen_clip_analyzer
 
 ### 8.7 Starting the backends (launch before pipeline runs)
 
-**Gemma server (ln -np 3 for concurrent window processing):**
+**Gemma server (Unsloth QAT GGUF, `-np 3` for concurrent window processing):**
 ```bash
-/home/john/llama.cpp/build_compat/bin/llama-server \
+# Preferred: keep it alive in tmux on WSL
+TMUX='' tmux new-session -d -s gemma "cd /home/john && \
+  /home/john/llama.cpp/build_compat/bin/llama-server \
   -m /home/john/models/gemma-4-12b/gemma-4-12B-it-Q4_K_M.gguf \
   --mmproj /home/john/models/gemma-4-12b/mmproj-gemma-4-12B-it-Q8_0.gguf \
   --host 0.0.0.0 --port 8084 \
   -ngl all -np 3 --kv-unified -c 32768 \
   -b 2048 -ub 512 -fa on --jinja \
-  --temp 0.2 --top-p 0.95 --top-k 64 --repeat-penalty 1.0
+  --temp 0.2 --top-p 0.95 --top-k 64 --repeat-penalty 1.0 \
+  > /home/john/gemma_server.log 2>&1"
+
+# Note: these symlinked filenames currently point at:
+#   gemma-4-12B-it-qat-UD-Q4_K_XL.gguf
+#   mmproj-F16.gguf
 ```
 
 **Bee/Qwen server (prebuilt CUDA 13.1, GPU mmproj, DFlash):**
@@ -341,7 +348,7 @@ These are not guaranteed by the lightweight local venv:
 - YOLO / `vod-lens-worker` image for object/frame processing,
 - vLLM audio image for Omni/audio analysis,
 - Bee/Qwen vision backend service on port 8082 (prebuilt CUDA 13.1 binary, not Docker).
-- Gemma 4 12B enrichment service on port 8084 (upstream llama.cpp build).
+- Gemma 4 12B enrichment service on port 8084 (upstream llama.cpp build using Unsloth QAT GGUF; typically kept alive in `tmux` session `gemma`).
 
 ### 10.3 Optional SpeakerID runtime
 Speaker attribution uses `requirements-speakerid.txt` and is optional/gated:
@@ -378,18 +385,18 @@ python3 --version
 - Missing local Python package: phase4 prep/validation import fails; install `requirements-preprocessing.txt`.
 - Missing HF token or gated-model access: SpeakerID diarization fails; export `HF_TOKEN`/`HUGGINGFACE_TOKEN`.
 - Bee not running/unhealthy: synthesis preflight fails; check Bee server logs at `/home/john/bee_prebuilt_v031.log`.
-- Gemma not running/unhealthy: fast-pass Gemma enrichment errors; check Gemma server logs.
+- Gemma not running/unhealthy: fast-pass Gemma enrichment errors; check Gemma server logs (`/home/john/gemma_server.log`) and verify `tmux ls | grep gemma`.
 - GPU memory pressure: check `nvidia-smi`. Both Bee (~24 GiB) + Gemma (~7 GiB) fit on RTX 5090 (~32 GiB).
 
 ---
 
 ## 11) Current Open Risks
 
-1. **Gemma enrichment parse rate:** Real VOD run showed 39/262 (15%) successful Gemma annotations; 223/262 returned "empty response". The enrichment still drives text triage via chunk coverage regardless of parse success, but parse rate needs improvement for future quality gains.
+1. **Gemma enrichment parse rate:** Previously 201/262 windows returned "empty response" due to `response_format=json_object` conflicting with multimodal input in llama.cpp. Now eliminated — Gemma outputs raw natural-language observations, parsed deterministically by `parse_gemma_raw_output()`. Every window produces usable annotations regardless of output format.
 
 2. **Qwen thinking/output contract (vLLM only):** vLLM Qwen3.6 NVFP4 requires `enable_thinking=False` + `response_format=json_object` to produce usable output. BeeLlama handles thinking mode correctly. Only relevant if the backend switches back to vLLM.
 
-3. **Gemma concurrent workers:** Default is `GEMMA_CONCURRENT_WORKERS=3` with `-np 3` on Gemma. Tuning this higher may help further if ffmpeg audio extraction becomes the bottleneck.
+3. **Gemma concurrent workers:** Default is `GEMMA_CONCURRENT_WORKERS=3` with `-np 3` on Gemma. Tuning this higher may help further if ffmpeg audio extraction becomes the bottleneck. Active WSL backend is the Unsloth QAT GGUF (`UD-Q4_K_XL`).
 
 4. **Audio phase (Omni 7B) not validated on this RTX 5090 stack:** Currently gated behind `--skip-audio`. The Omni container and audio pipeline are carryover from a 3090/vLLM era and may need revalidation on the current setup.
 
