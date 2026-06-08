@@ -410,6 +410,8 @@ r = requests.post("https://gql.twitch.tv/gql",
 ```
 Then set title via ``publishClip`` with ``segments: []`` and delete duplicates via ``deleteClips``. Custom duration requires the Helix endpoint above.
 
+**Timestamp drift:** WhisperX transcript timestamps may not align perfectly with the Twitch VOD player position — audio download speed differences can cause cumulative drift up to 20-30s by 6,000s into a long VOD. When using pipeline offsets for clip creation, add a position-dependent correction: ``requested_offset = transcript_offset + (transcript_offset * 0.005)`` as a starting approximation. The working clip creation workflow should also be marked as **Open Risk** in the pipeline — the offset mismatch between transcript timestamps and VOD player positions means clips at late-VOD positions may need manual offset adjustment.
+
 ---
 
 ## 9) Output Contract
@@ -509,6 +511,9 @@ python3 --version
 3. **Gemma concurrent workers vs MTP:** Default is `GEMMA_CONCURRENT_WORKERS=3`. When using `--model-draft` (MTP), `-np` must be `1`, so `GEMMA_CONCURRENT_WORKERS` should also be `1`. The MTP draft-model path serializes window processing. Non-MTP mode supports `-np 3 + GEMMA_CONCURRENT_WORKERS=3` for parallel window processing.
 
 4. **Audio phase (Omni 7B) not validated on this RTX 5090 stack:** Currently gated behind `--skip-audio`. The Omni container and audio pipeline are carryover from a 3090/vLLM era and may need revalidation on the current setup.
+
+5. **Transcript-to-VOD timestamp drift:** WhisperX audio download speed differences cause cumulative timestamp drift vs the Twitch VOD player position (up to ~20-30s by the 2-hour mark). Pipeline-suggested clip offsets may need correction before Twitch clip creation:
+   ``requested_offset = transcript_offset + (transcript_offset * 0.005)``
 
 ---
 
