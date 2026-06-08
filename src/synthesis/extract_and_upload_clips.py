@@ -8,9 +8,14 @@ Reads qwen_vision_progressive.json output, filters high-scoring clips,
 extracts them with browser-compatible ffmpeg settings, uploads to Nextcloud
 via WebDAV, and creates public share links via the OCS API.
 
+Optionally cleans up large phase4 artifacts after successful extraction.
+
 Usage:
-    python extract_and_upload_clips.py --json path/to/qwen_vision_progressive.json \
+    python extract_and_upload_clips.py --json path/to/qwen_vision_progressive.json \\
         [--vod path/to/raw_vod.mp4] --min-score 7 --output-dir ./clips
+
+    python extract_and_upload_clips.py --json path/to/qwen_vision_progressive.json \\
+        --cleanup-artifacts --cleanup-mode post-extraction --cleanup-write-report
 
 If --vod is omitted, the script auto-detects the raw MP4 from common phase4 paths.
 
@@ -28,6 +33,18 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+# Optional: cleanup module
+try:
+    from src.artifacts.cleanup import (
+        CleanupMode,
+        build_cleanup_plan,
+        execute_cleanup_plan,
+    )
+
+    HAS_CLEANUP = True
+except ImportError:
+    HAS_CLEANUP = False
 
 DEFAULT_BASE_URL = "https://files.washingtondcspirit.com"
 DEFAULT_USER = "john"
@@ -186,7 +203,7 @@ def extract_clip(
         "-movflags", "+faststart",
         output_path,
     ]
-    log(f"  Extracting {start}s-{end}s → {output_path}")
+    log(f"  Extracting {start}s-{end}s \u2192 {output_path}")
     run(cmd, timeout=600)
 
 
@@ -201,7 +218,7 @@ def upload_webdav(local_path: str, remote_name: str) -> None:
     # If file exists, delete first to avoid stale-cache breakage
     run(["curl", "-s", "-u", f"{user}:{pw}", "-X", "DELETE", url], check=False)
 
-    log(f"  Uploading {local_path} → {url}")
+    log(f"  Uploading {local_path} \u2192 {url}")
     run(
         [
             "curl", "-s", "-u", f"{user}:{pw}",
@@ -241,6 +258,57 @@ def create_share(remote_name: str) -> str:
     return match.group(1)
 
 
+def _run_cleanup(phase4_dir: Path, vod_id: str | None, args) -> None:
+    """Run artifact cleanup after extraction/upload succeeds."""
+    if not HAS_CLEANUP:
+        log("WARN: cleanup module not available (src.artifacts.cleanup). Skipping cleanup.")
+        return
+
+    do_dry_run = args.cleanup_dry_run
+    label = "[DRY RUN] " if do_dry_run else ""
+
+    log(f"\n{'='*60}")
+    log(f"{label}RUNNING ARTIFACT CLEANUP (mode={args.cleanup_mode})")
+
+    plan = build_cleanup_plan(
+        phase4_dir=phase4_dir,
+        vod_id=vod_id or "",
+        mode=args.cleanup_mode,
+        include_raw=not args.cleanup_keep_raw,
+        include_frames=not args.cleanup_keep_frames,
+    )
+
+    if not plan:
+        log("  Nothing to clean up (all targets gone or final output missing).")
+        return
+
+    result = execute_cleanup_plan(
+        plan,
+        phase4_dir=phase4_dir,
+        dry_run=do_dry_run,
+        mode=args.cleanup_mode,
+    )
+
+    if result.deleted:
+        log(f"  Deleted {len(result.deleted)} items, freed {_fmt_bytes(result.bytes_freed)}")
+    if result.skipped:
+        log(f"  Skipped {len(result.skipped)} items (protected / not found)")
+
+    if args.cleanup_write_report and not do_dry_run:
+        report_path = phase4_dir / f"cleanup_report_{vod_id}.json"
+        with open(report_path, "w") as f:
+            json.dump(result.to_dict(), f, indent=2)
+        log(f"  Report: {report_path}")
+
+
+def _fmt_bytes(b: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(b) < 1024:
+            return f"{b:.1f} {unit}"
+        b /= 1024
+    return f"{b:.1f} PB"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Extract high-scoring clips and upload to Nextcloud"
@@ -273,6 +341,38 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help="Print what would be done without extracting or uploading",
+    )
+    # ── Cleanup options ──
+    parser.add_argument(
+        "--cleanup-artifacts",
+        action="store_true",
+        help="Run artifact cleanup after successful extraction/upload",
+    )
+    parser.add_argument(
+        "--cleanup-mode",
+        default="post-extraction",
+        choices=["intermediate", "post-extraction", "aggressive"],
+        help="Cleanup aggressiveness (default: post-extraction)",
+    )
+    parser.add_argument(
+        "--cleanup-dry-run",
+        action="store_true",
+        help="Dry-run the cleanup step (report what would be deleted)",
+    )
+    parser.add_argument(
+        "--cleanup-keep-raw",
+        action="store_true",
+        help="Keep raw VOD mp4 during cleanup",
+    )
+    parser.add_argument(
+        "--cleanup-keep-frames",
+        action="store_true",
+        help="Keep extracted frame images during cleanup",
+    )
+    parser.add_argument(
+        "--cleanup-write-report",
+        action="store_true",
+        help="Write cleanup_report_<VOD_ID>.json after cleanup",
     )
     args = parser.parse_args()
 
@@ -359,7 +459,7 @@ def main() -> None:
         upload_webdav(str(local_path), filename)
         share_url = create_share(filename)
 
-        log(f"  ✅ Share link: {share_url}")
+        log(f"  \u2705 Share link: {share_url}")
         results.append(
             {
                 "rank": rank,
@@ -377,6 +477,10 @@ def main() -> None:
         with open(manifest, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2)
         log(f"\nManifest saved: {manifest}")
+
+    # ── Artifact cleanup (only after successful extraction/upload) ──
+    if args.cleanup_artifacts and results and not args.dry_run:
+        _run_cleanup(phase4_dir, vod_id, args)
 
     log("\nDone.")
 
