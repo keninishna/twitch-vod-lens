@@ -40,6 +40,7 @@ Given a Twitch VOD, produce:
 3    Final verification + title finalization + dedup + intelligence report
 Post RMS fallback only for unresolved full 120s windows, then mandatory rescoring
 Post+ Optional profile update proposal/auto-merge (mode-gated)
+Post++ Optional artifact cleanup (intermediate or post-extraction)
 ```
 
 **Fast-pass status (June 07):** Validated end-to-end on real VOD `2788478641` (197 clips, ~6.5 hr VOD). Gemma enrichment processed 262 windows, ~90 min total (Gemma + Qwen synthesis). Gemma 4 MTP support (PR #23398) was merged into upstream `llama.cpp` master on June 07, 2026. Multimodal MTP (images + draft model) works correctly — the draft-context sequence position bug is resolved. Gemma MTP achieves **~313 T/s predicted** on RTX 5090 with 77% draft acceptance. Raw text observations + deterministic Python parser (`parse_gemma_raw_output`) eliminates all parse failures. Concurrency (`GEMMA_CONCURRENT_WORKERS=3`) reduces Gemma enrichment wall time ~3×.
@@ -166,6 +167,11 @@ Persistent intelligence:
 - `src/synthesis/bee_server.py`
 - `src/synthesis/schemas/clip_intelligence_stages.py`
 - `src/synthesis/extract_and_upload_clips.py`
+
+### Artifact cleanup
+- `src/artifacts/__init__.py`
+- `src/artifacts/cleanup.py`
+- `scripts/cleanup_phase4_artifacts.py`
 
 ---
 
@@ -310,6 +316,47 @@ PYTHONPATH=. python3 scripts/compare_fastpass_recall.py \
   --triage vods/phase4_<VOD_ID>/text_triage_candidates.json \
   --shortlist vods/phase4_<VOD_ID>/vision_shortlist.json
 ```
+
+### 8.9 Cleanup phase4 artifacts after extraction/upload
+
+After clips are extracted/uploaded and ``share_links.json`` is saved, remove large intermediate artifacts:
+
+```bash
+python src/synthesis/extract_and_upload_clips.py \
+  --json vods/phase4_<VOD_ID>/qwen_vision_progressive.json \
+  --vod-id <VOD_ID> \
+  --output-dir clips/<VOD_ID> \
+  --cleanup-artifacts \
+  --cleanup-write-report
+```
+
+Manual standalone dry run:
+
+```bash
+PYTHONPATH=. python3 scripts/cleanup_phase4_artifacts.py \
+  --vod-id <VOD_ID> \
+  --phase4-dir vods/phase4_<VOD_ID> \
+  --mode post-extraction \
+  --dry-run
+```
+
+Three modes:
+
+- **intermediate** — keeps raw VOD, frames, fusion, manifest. Removes per-step temp artifacts (audio batch I/O, fast-pass debug JSONs). Safe mid-pipeline.
+- **post-extraction** (default) — removes raw VOD, frames, and all intermediates. Requires ``qwen_vision_progressive.json`` to exist.
+- **aggressive** — additionally removes fusion, manifest, transcript, scenes, chat, YOLO, speaker attribution. Only when you're done with the VOD.
+
+Flags: ``--keep-raw``, ``--keep-frames``, ``--write-report``.
+
+### Output contract after cleanup
+
+After cleanup in ``post-extraction`` or ``aggressive`` mode, only these remain in the ``phase4_<VOD_ID>`` directory:
+
+- ``qwen_vision_progressive.json``
+- ``profile_update_proposal_<VOD_ID>.json`` (if profile proposal mode was enabled)
+- ``cleanup_report_<VOD_ID>.json`` (if report writing was enabled)
+- ``data/streamer_intelligence/`` (persistent profiles, always protected)
+- Extracted clips in the output directory (not under ``vods/``)
 
 ---
 
