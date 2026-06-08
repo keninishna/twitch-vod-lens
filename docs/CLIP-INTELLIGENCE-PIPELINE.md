@@ -358,6 +358,52 @@ After cleanup in ``post-extraction`` or ``aggressive`` mode, only these remain i
 - ``data/streamer_intelligence/`` (persistent profiles, always protected)
 - Extracted clips in the output directory (not under ``vods/``)
 
+### 8.10 Create clips from intelligence output (via Twitch API)
+
+After the pipeline produces ``qwen_vision_progressive.json`` with ranked clips, you can create Twitch clips with custom durations from the VOD using the ``POST /helix/videos/clips`` endpoint. This requires:
+
+1. **Editor role** on the broadcaster's channel. The broadcaster adds you via Dashboard → Community → Roles Manager → Add Role → Editor.
+2. **OAuth token with ``editor:manage:clips`` scope** (plus ``clips:edit``).
+
+This scope is **not** available on TwitchTokenGenerator's default list. To obtain it:
+
+- Register an app at https://dev.twitch.tv/console/apps (OAuth Redirect URL: ``http://localhost``)
+- Authorize via:
+  ```
+  https://id.twitch.tv/oauth2/authorize
+    ?client_id=YOUR_CLIENT_ID
+    &redirect_uri=http://localhost
+    &response_type=token
+    &scope=editor%3Amanage%3Aclips+clips%3Aedit
+  ```
+- Copy the ``access_token`` from the resulting URL bar.
+
+**Credentials file (persistent):** ``/home/hermeswebui/.hermes/twitch_credentials.json`` contains the access token + client ID.
+
+**Example call:**
+```bash
+curl -X POST "https://api.twitch.tv/helix/videos/clips
+  ?broadcaster_id=BROADCASTER_ID
+  &editor_id=YOUR_USER_ID
+  &vod_id=VOD_ID
+  &vod_offset=300
+  &duration=39
+  &title=She+forgot+the+clothes+and+freaks+out" \
+  -H "Authorization: Bearer ACCESS_TOKEN" \
+  -H "Client-ID: YOUR_CLIENT_ID"
+```
+
+**Python (GQL fallback — works without editor scope, creates 30s clips only):**
+```python
+import requests
+r = requests.post("https://gql.twitch.tv/gql",
+    headers={"Client-ID": "kimne78kx3ncx6brgo4mv6wki5h1ko",
+             "Authorization": f"OAuth {browser_auth_token}",
+             "Content-Type": "text/plain;charset=UTF-8"},
+    json={"query": f'mutation {{ createClip(input: {{ broadcasterID: "{id}", videoID: "{vod}", offsetSeconds: {offset} }}) {{ clip {{ id }} }} }}'})
+```
+Then set title via ``publishClip`` with ``segments: []`` and delete duplicates via ``deleteClips``. Custom duration requires the Helix endpoint above.
+
 ---
 
 ## 9) Output Contract
