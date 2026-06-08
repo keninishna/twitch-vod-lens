@@ -86,7 +86,8 @@ Do **not** reuse/symlink phase4 data across different VOD IDs.
 
 ### 5.2 Duration
 - Retention-first shortest valid trim.
-- Penalties:
+- Twitch clips have a **hard max of 60 seconds** via API. Clips >60s cannot be created programmatically on Twitch.
+- Penalties (for pipeline's internal score only; clips >60s require manual trim before Twitch upload):
   - `<=60s`: `0`
   - `61–75s`: `-1`
   - `76–90s`: `-2`
@@ -379,6 +380,11 @@ This scope is **not** available on TwitchTokenGenerator's default list. To obtai
 - Copy the ``access_token`` from the resulting URL bar.
 
 **Credentials file (persistent):** ``/home/hermeswebui/.hermes/twitch_credentials.json`` contains the access token + client ID.
+
+**Important limits:**
+- Max clip duration via API: **60 seconds**. Pipeline suggested trims >60s must be shortened.
+- Offset shift: the Helix endpoint subtracts ~2-8s from the requested ``vod_offset``. Add 5-10s to compensate.
+- Clip processing is asynchronous — if a clip ID returns ``202`` but never materializes, the offset may be in a dead zone (often early VOD positions under 10min, or intermittently at any position). Retry with a slightly different offset.
 
 **Example call:**
 ```bash
