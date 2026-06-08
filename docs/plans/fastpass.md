@@ -23,7 +23,7 @@
 5. **Preserve visual-only and audio-only rescue lanes.** Do not shortlist solely by Qwen text rank; include Gemma audio/visual flags, chat spikes, YOLO/scene novelty, and sentinel coverage.
 6. **Every artifact must be auditable.** If a clip is missed, operators must be able to see whether Gemma enrichment failed, Qwen triage failed, shortlist selection dropped it, Qwen vision mis-scored it, Stage 2 rejected it, or Stage 3 dedup/finalization removed it.
 7. **Default rollout must be safe.** Implement behind CLI flags first; existing full-vision behavior remains available as baseline until real WSL validation proves recall and quality.
-8. **Prefer the latest upstream `llama.cpp` baseline for Gemma 4 and do not depend on unsupported Gemma 12B MTP.** `google/gemma-4-12B-it-assistant` exists, but current upstream `llama.cpp` does not show `gemma4_unified_assistant` support. Use baseline or `ngram-mod` draftless speculative decoding only until compatible assistant GGUF/runtime support is proven. Bee/BeeLLaMA quickstarts are Qwen-side references, not a Gemma runtime requirement.
+8. **Gemma 4 MTP support is now available.** PR #23398 ([Gemma 4 MTP](https://github.com/ggml-org/llama.cpp/pull/23398)) was merged into upstream `llama.cpp` master on June 07, 2026. Multimodal MTP (images + draft model) works correctly. Use `--spec-type draft-mtp --spec-draft-n-max 4 --reasoning on` with the Janvitos MTP draft model. Note that MTP requires `-np 1` (single slot), so `GEMMA_CONCURRENT_WORKERS` should be set to 1 as well. For maximum parallel window throughput, use non-MTP mode with `-np 3 + GEMMA_CONCURRENT_WORKERS=3`.
 
 ---
 
@@ -174,7 +174,7 @@ Initial defaults for WSL validation:
 --gemma-smoke-test-only             false
 ```
 
-Recommended latest-upstream `llama.cpp` baseline command for WSL/RTX 5090 validation:
+Recommended latest-upstream `llama.cpp` baseline command for WSL/RTX 5090 validation (do NOT use `--chat-template-kwargs '{"enable_thinking":false}'` — Gemma 4 needs thinking on for raw text observation output):
 
 ```bash
 cd ~/llama.cpp
@@ -562,6 +562,7 @@ OpenAI-compatible payload rules:
 - images use `{"type":"image_url", "image_url":{"url":"data:image/jpeg;base64,..."}}`
 - audio uses `{"type":"input_audio", "input_audio":{"data":"<base64>", "format":"wav"}}`
 - do not use `audio_url`; llama-server does not implement it
+- **do NOT use `response_format: {"type":"json_object"}`** — Gemma 4 + llama.ccp guided JSON grammar produces empty responses with multimodal input. Instead, ask for raw natural-language observations with labeled sections and parse deterministically.
 
 **Tests:**
 

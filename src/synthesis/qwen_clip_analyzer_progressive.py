@@ -1119,8 +1119,24 @@ def _build_fast_pass_artifacts(*, fusion: dict, manifest: dict, clips: list[dict
             max_windows=GEMMA_MAX_WINDOWS,
             timeout=GEMMA_RESPONSE_TIMEOUT_SECONDS,
             concurrent_workers=GEMMA_CONCURRENT_WORKERS,
+            audio_max_seconds=GEMMA_AUDIO_MAX_SECONDS,
         )
         gemma_artifact = gemma_result["artifact"]
+
+    bee_ready = ensure_bee_api_ready(
+        base_url=BEE_URL,
+        start_bee=START_BEE,
+        start_command=BEE_START_COMMAND,
+        timeout=300,
+        check_interval=5,
+        logger=lambda message: log(f"  {message}"),
+    )
+    if not bee_ready.ready:
+        raise RuntimeError(bee_ready.message)
+    if bee_ready.started:
+        log(f"Bee API managed startup succeeded at {bee_models_url()}")
+    else:
+        log(f"Bee API already reachable at {bee_models_url()}")
 
     triage_candidates, triage_stats = _run_fast_pass_text_triage(
         triage_chunks=triage_chunks,
@@ -1203,25 +1219,27 @@ def _build_fast_pass_artifacts(*, fusion: dict, manifest: dict, clips: list[dict
 def run():
     log(f"Loading data for VOD {VOD_ID} ...")
 
-    # Preflight: Bee API readiness/startup is required before Stage 1 execution.
-    preflight = ensure_bee_api_ready(
-        base_url=BEE_URL,
-        start_bee=START_BEE,
-        start_command=BEE_START_COMMAND,
-        timeout=300,
-        check_interval=5,
-        logger=lambda message: log(f"  {message}"),
-    )
-    if not preflight.ready:
-        log("ERROR: Bee API preflight failed; aborting before Stage 1.")
-        print(preflight.message)
-        if not START_BEE:
-            print("Hint: re-run with --start-bee and optionally --bee-start-command '<command>'.")
-        sys.exit(2)
-    if preflight.started:
-        log(f"Bee API managed startup succeeded at {bee_models_url()}")
-    else:
-        log(f"Bee API already reachable at {bee_models_url()}")
+    # Standard path: Bee is required before Stage 1. Fast-pass can defer Bee
+    # startup until after Gemma enrichment to maximize Gemma GPU headroom.
+    if not FAST_PASS:
+        preflight = ensure_bee_api_ready(
+            base_url=BEE_URL,
+            start_bee=START_BEE,
+            start_command=BEE_START_COMMAND,
+            timeout=300,
+            check_interval=5,
+            logger=lambda message: log(f"  {message}"),
+        )
+        if not preflight.ready:
+            log("ERROR: Bee API preflight failed; aborting before Stage 1.")
+            print(preflight.message)
+            if not START_BEE:
+                print("Hint: re-run with --start-bee and optionally --bee-start-command '<command>'.")
+            sys.exit(2)
+        if preflight.started:
+            log(f"Bee API managed startup succeeded at {bee_models_url()}")
+        else:
+            log(f"Bee API already reachable at {bee_models_url()}")
 
     fusion = load_json(FUSION_PATH)
     manifest = load_json(CLIP_MANIFEST_PATH)

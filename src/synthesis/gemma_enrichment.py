@@ -24,12 +24,26 @@ def build_gemma_enrichment_prompt(window: dict) -> str:
     end = int(window.get("end", start + 1))
     return (
         "You are producing factual annotations only. "
-        "Return JSON only. Do not make final clip decisions or final platform recommendations. "
-        f"Analyze the window from {start}s to {end}s and report timestamped audio/visual evidence. "
-        "Focus on donation/TTS alerts vs streamer speech, game audio vs human reaction, "
-        "streamer-led vs non-streamer-led moments, laughter/surprise/confusion/focused affect, "
-        "and visual evidence of reaction or payoff. "
-        "Use concise evidence strings and keep all claims fallible."
+        "Do not make final clip decisions or final platform recommendations. "
+        f"Analyze the window from {start}s to {end}s. "
+        "Report what you observe using the labeled sections below. "
+        "Leave a section blank if nothing relevant is observed.\n\n"
+        "AUDIO_EVENTS:\n"
+        "Timestamp each distinct sound: what type (streamer_speech, non_streamer_speech, donation_alert, tts_alert, game_audio, music, laugh, silence), "
+        "who is speaking (streamer, chat_tts, game_character, unknown), and your confidence (0.0-1.0). "
+        "Example: '1238s: donation_alert likely TTS, speaker=unknown, confidence=0.8'\n\n"
+        "VISUAL_EVENTS:\n"
+        "Timestamp each visual change: what type (streamer_visible, face_visible, laughing, surprised, focused, gameplay_event, scene_change, visual_payoff), "
+        "and your confidence. "
+        "Example: '1241s: streamer laughing at screen, confidence=0.9'\n\n"
+        "SPEAKER:\n"
+        "Primary speaker identity: streamer, non_streamer, mixed, or unknown. "
+        f"How likely is the streamer leading this window (0.0-1.0)? How likely is this a transactional/TTS/donation alert (0.0-1.0)?\n\n"
+        "EMOTION:\n"
+        "Streamer affect: amused, surprised, confused, flat, performative, focused, or unknown. "
+        "Is the reaction organic or triggered by an alert/donation?\n\n"
+        "RISK_FLAGS:\n"
+        "Any concerns: possible_alert_reaction, game_audio_dominant, visual_context_required, speaker_uncertain"
     )
 
 
@@ -43,13 +57,22 @@ def _load_bytes(path: str | None) -> bytes | None:
 
 
 def build_gemma_chat_payload(*, model: str, prompt: str, image_paths: list[str], audio_path: str | None, max_tokens: int = 1200) -> dict:
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    """Build payload for Gemma 4 multimodal call.
+
+    Modality order matters for optimal results (per Unsloth QAT guide):
+      IMAGES first → TEXT second → AUDIO last
+    """
+    content: list[dict[str, Any]] = []
+    # 1) Images first
     for image_path in image_paths or []:
         blob = _load_bytes(image_path)
         if blob is None:
             continue
         mime = "image/jpeg" if Path(image_path).suffix.lower() not in {".png", ".webp"} else "image/png"
         content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(blob).decode()}"}})
+    # 2) Text second
+    content.append({"type": "text", "text": prompt})
+    # 3) Audio last
     if audio_path:
         blob = _load_bytes(audio_path)
         if blob is not None:
@@ -60,7 +83,6 @@ def build_gemma_chat_payload(*, model: str, prompt: str, image_paths: list[str],
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.0,
         "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
     }
 
 
@@ -71,6 +93,107 @@ def _parse_json_response(text: str | None) -> tuple[bool, Any | None, str | None
         return True, json.loads(text), None
     except Exception as exc:
         return False, None, str(exc)
+
+
+def parse_gemma_raw_output(text: str | None) -> dict:
+    """Parse Gemma's raw natural-language observations into structured annotation dict."""
+    result = {
+        "audio_events": [],
+        "visual_events": [],
+        "speaker_nuance": {
+            "primary_speaker": "unknown",
+            "streamer_led_likelihood": 0.0,
+            "non_streamer_voice_present": False,
+            "non_streamer_voice_type": "unknown",
+        },
+        "emotion_nuance": {
+            "streamer_affect": "unknown",
+            "organic_reaction_likelihood": 0.0,
+            "transactional_alert_likelihood": 0.0,
+            "evidence": "",
+        },
+        "risk_flags": [],
+        "clip_relevance_notes": [],
+    }
+    if not text:
+        return result
+
+    import re
+
+    # Extract AUDIO_EVENTS section
+    audio_match = re.search(r"AUDIO_EVENTS:\s*(.*?)(?=\n\nVISUAL_EVENTS:|\n\nSPEAKER:|$)", text, re.DOTALL)
+    if audio_match:
+        raw = audio_match.group(1).strip()
+        for line in raw.split("\n"):
+            line = line.strip()
+            if not line or line.startswith("Example") or line.startswith("None"):
+                continue
+            ts_match = re.search(r"(\d+[\.\d]*)s", line)
+            result["audio_events"].append({
+                "timestamp": float(ts_match.group(1)) if ts_match else 0.0,
+                "raw": line,
+            })
+
+    # Extract VISUAL_EVENTS section
+    visual_match = re.search(r"VISUAL_EVENTS:\s*(.*?)(?=\n\nSPEAKER:|\n\nEMOTION:|$)", text, re.DOTALL)
+    if visual_match:
+        raw = visual_match.group(1).strip()
+        for line in raw.split("\n"):
+            line = line.strip()
+            if not line or line.startswith("Example") or line.startswith("None"):
+                continue
+            ts_match = re.search(r"(\d+[\.\d]*)s", line)
+            result["visual_events"].append({
+                "timestamp": float(ts_match.group(1)) if ts_match else 0.0,
+                "raw": line,
+            })
+
+    # Extract SPEAKER section
+    speaker_match = re.search(r"SPEAKER:\s*(.*?)(?=\n\nEMOTION:|\n\nRISK_FLAGS:|$)", text, re.DOTALL)
+    if speaker_match:
+        raw = speaker_match.group(1).strip()
+        # Extract streamer_led_likelihood
+        sll = re.search(r"streamer.*?led.*?([\d\.]+)", raw, re.IGNORECASE)
+        if sll:
+            result["speaker_nuance"]["streamer_led_likelihood"] = float(sll.group(1))
+        # Extract transactional_alert_likelihood
+        tal = re.search(r"transactional.*?([\d\.]+)", raw, re.IGNORECASE)
+        if tal:
+            result["emotion_nuance"]["transactional_alert_likelihood"] = float(tal.group(1))
+        if re.search(r"non_streamer|chat_tts|game_character", raw, re.IGNORECASE):
+            result["speaker_nuance"]["non_streamer_voice_present"] = True
+        for kw in ["streamer", "non_streamer", "mixed", "unknown"]:
+            if re.search(kw, raw, re.IGNORECASE):
+                result["speaker_nuance"]["primary_speaker"] = kw
+
+    # Extract EMOTION section
+    emotion_match = re.search(r"EMOTION:\s*(.*?)(?=\n\nRISK_FLAGS:|$)", text, re.DOTALL)
+    if emotion_match:
+        raw = emotion_match.group(1).strip()
+        result["emotion_nuance"]["evidence"] = raw[:200]
+        for aff in ["amused", "surprised", "confused", "flat", "performative", "focused"]:
+            if re.search(aff, raw, re.IGNORECASE):
+                result["emotion_nuance"]["streamer_affect"] = aff
+                break
+        if re.search(r"organic|genuine|natural", raw, re.IGNORECASE):
+            result["emotion_nuance"]["organic_reaction_likelihood"] = min(
+                result["emotion_nuance"]["organic_reaction_likelihood"] + 0.3, 1.0
+            )
+        if re.search(r"alert|donation|tts|transactional", raw, re.IGNORECASE):
+            result["emotion_nuance"]["transactional_alert_likelihood"] = max(
+                result["emotion_nuance"]["transactional_alert_likelihood"], 0.3
+            )
+
+    # Extract RISK_FLAGS section
+    risk_match = re.search(r"RISK_FLAGS:\s*(.*)", text, re.DOTALL)
+    if risk_match:
+        raw = risk_match.group(1).strip()
+        for flag in ["possible_alert_reaction", "game_audio_dominant",
+                     "visual_context_required", "speaker_uncertain"]:
+            if re.search(flag.replace("_", " "), raw, re.IGNORECASE):
+                result["risk_flags"].append(flag)
+
+    return result
 
 
 def call_gemma_llamacpp(*, base_url: str, payload: dict, timeout: int) -> dict:
@@ -96,7 +219,7 @@ def _extract_window_audio(vod_mp4: str, window: dict, output_wav: str) -> None:
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def run_gemma_enrichment(*, base_url: str, model: str, phase4_dir: str, fusion: dict, manifest: dict, frames_dir: str, raw_vod_path: str, window_seconds: int, stride_seconds: int, frames_per_window: int, max_windows: int, timeout: int, concurrent_workers: int = 1) -> dict:
+def run_gemma_enrichment(*, base_url: str, model: str, phase4_dir: str, fusion: dict, manifest: dict, frames_dir: str, raw_vod_path: str, window_seconds: int, stride_seconds: int, frames_per_window: int, max_windows: int, timeout: int, audio_max_seconds: int = 30, concurrent_workers: int = 1) -> dict:
     phase4_path = Path(phase4_dir)
     phase4_path.mkdir(parents=True, exist_ok=True)
     windows = build_gemma_annotation_windows(
@@ -128,10 +251,11 @@ def run_gemma_enrichment(*, base_url: str, model: str, phase4_dir: str, fusion: 
                 _extract_window_audio(raw_vod_path, window, str(audio_path))
                 prompt = build_gemma_enrichment_prompt(window)
                 payload = build_gemma_chat_payload(model=model, prompt=prompt, image_paths=image_paths, audio_path=str(audio_path), max_tokens=1200)
-                result = call_gemma_llamacpp(base_url=base_url, payload=payload, timeout=timeout)
-                normalized = normalize_gemma_annotation(result if result.get("parsed") is None else (result.get("parsed") if isinstance(result.get("parsed"), dict) else {}), window)
-                normalized["parse_ok"] = bool(result.get("parse_ok"))
-                normalized["error"] = result.get("error")
+                raw_response = call_gemma_llamacpp(base_url=base_url, payload=payload, timeout=timeout)
+                parsed_gemma = parse_gemma_raw_output(raw_response.get("raw_content"))
+                normalized = normalize_gemma_annotation(parsed_gemma, window)
+                normalized["parse_ok"] = True
+                normalized["error"] = None
                 normalized["source_refs"] = {
                     "transcript_segment_ids": [],
                     "chat_message_ids": [],

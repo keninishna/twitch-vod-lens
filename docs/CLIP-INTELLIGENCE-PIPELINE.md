@@ -1,7 +1,7 @@
 # VOD Lens — Clip Intelligence Pipeline (Agent Context Brief)
 
 > **Status:** Active development / Phase 1 validated  
-> **Last Updated:** June 05, 2026  
+> **Last Updated:** June 07, 2026  
 > **Repo:** https://github.com/keninishna/twitch-vod-lens
 
 This is the compressed, AI-agent-facing pipeline contract. Keep this file short and operational.
@@ -42,12 +42,12 @@ Post RMS fallback only for unresolved full 120s windows, then mandatory rescorin
 Post+ Optional profile update proposal/auto-merge (mode-gated)
 ```
 
-**Fast-pass status (June 05):** Validated end-to-end on real VOD `2788478641` (197 clips, ~6.5 hr VOD). Gemma enrichment processed 262 windows, ~48 min sequential with `response_format=json_object` — 201/262 returned empty responses due to guided JSON grammar conflicts with multimodal input. Switched to raw natural-language observations + deterministic Python parser (`parse_gemma_raw_output`), eliminating parse failures entirely since every window produces usable annotations regardless of Gemma output format. Concurrency (`-np 3` + `GEMMA_CONCURRENT_WORKERS=3`) added to reduce Gemma enrichment wall time ~3×.
+**Fast-pass status (June 07):** Validated end-to-end on real VOD `2788478641` (197 clips, ~6.5 hr VOD). Gemma enrichment processed 262 windows, ~90 min total (Gemma + Qwen synthesis). Gemma 4 MTP support (PR #23398) was merged into upstream `llama.cpp` master on June 07, 2026. Multimodal MTP (images + draft model) works correctly — the draft-context sequence position bug is resolved. Gemma MTP achieves **~313 T/s predicted** on RTX 5090 with 77% draft acceptance. Raw text observations + deterministic Python parser (`parse_gemma_raw_output`) eliminates all parse failures. Concurrency (`GEMMA_CONCURRENT_WORKERS=3`) reduces Gemma enrichment wall time ~3×.
 
 **Runtime stack:**
-- **Gemma 4 12B** → upstream `llama.cpp` / `build_compat` server on port **8084** using **Unsloth QAT GGUF** (`gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` + `mmproj-F16.gguf`) with `-np 3`
-- **Qwen 3.6 27B DFlash** → BeeLlama v0.3.1 prebuilt CUDA 13.1 on port **8082** (GPU mmproj, `--reasoning on`, `--chat-template-kwargs '{"preserve_thinking":true}'`)
-- Both run on WSL2 / RTX 5090, fit in ~32 GiB VRAM
+- **Gemma 4 12B** → latest `llama.cpp` master (PR #23398 merged) on port **8084** using **Unsloth QAT GGUF** (`gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` + `mmproj-F16.gguf` + `gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf` draft model) with `--spec-type draft-mtp --spec-draft-n-max 4 --reasoning on`. Built from source for Blackwell RTX 5090 (`-DCMAKE_CUDA_ARCHITECTURES=89-real;90-virtual`).
+- **Qwen 3.6 27B DFlash** → BeeLlama v0.3.1 prebuilt CUDA 13.1 on port **8082** (GPU mmproj, `--reasoning on`).
+- Both run on WSL2 / RTX 5090, fit in ~32 GiB VRAM (Gemma MTP ~11 GiB + Bee ~20 GiB).
 
 ---
 
@@ -225,27 +225,38 @@ python src/synthesis/extract_and_upload_clips.py \
 ### 8.6 Gemma concurrent workers override
 ```bash
 # Default is 3; reduce to 1 for sequential, increase for more parallelism
+# Note: GEMMA_CONCURRENT_WORKERS only affects the Python-side ThreadPoolExecutor
+# for parallel window requests. The Gemma server's -np must be >= your concurrent workers count.
+# When using --model-draft (MTP), -np must be 1, so set GEMMA_CONCURRENT_WORKERS=1 as well.
 GEMMA_CONCURRENT_WORKERS=1 PYTHONPATH=. python3 src/synthesis/qwen_clip_analyzer_progressive.py ...
 ```
 
 ### 8.7 Starting the backends (launch before pipeline runs)
 
-**Gemma server (Unsloth QAT GGUF, `-np 3` for concurrent window processing):**
+**Gemma server (MTP-enabled, latest llama.cpp master with PR #23398):**
 ```bash
-# Preferred: keep it alive in tmux on WSL
-TMUX='' tmux new-session -d -s gemma "cd /home/john && \
-  /home/john/llama.cpp/build_compat/bin/llama-server \
-  -m /home/john/models/gemma-4-12b/gemma-4-12B-it-Q4_K_M.gguf \
-  --mmproj /home/john/models/gemma-4-12b/mmproj-gemma-4-12B-it-Q8_0.gguf \
-  --host 0.0.0.0 --port 8084 \
-  -ngl all -np 3 --kv-unified -c 32768 \
-  -b 2048 -ub 512 -fa on --jinja \
-  --temp 0.2 --top-p 0.95 --top-k 64 --repeat-penalty 1.0 \
-  > /home/john/gemma_server.log 2>&1"
+# Build from source (one-time):
+git clone https://github.com/ggml-org/llama.cpp.git
+git checkout master
+cmake -B build -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=OFF -DCMAKE_CUDA_ARCHITECTURES="89-real;90-virtual"
+cmake --build build --config Release -j$(nproc)
 
-# Note: these symlinked filenames currently point at:
-#   gemma-4-12B-it-qat-UD-Q4_K_XL.gguf
-#   mmproj-F16.gguf
+# Launch in tmux (keep alive on WSL):
+tmux new-session -d -s gemma "cd /home/john && \
+  /home/john/llama.cpp-mtp/build/bin/llama-server \
+  -m /home/john/models/gemma-4-12b/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
+  --model-draft /home/john/models/gemma-4-12b/gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf \
+  --mmproj /home/john/models/gemma-4-12b/mmproj-F16.gguf \
+  --spec-type draft-mtp --spec-draft-n-max 4 \
+  --host 0.0.0.0 --port 8084 \
+  -ngl all -np 1 --kv-unified -c 32768 \
+  -b 2048 -ub 512 -fa on --jinja --reasoning on \
+  --temp 0.2 --top-p 0.95 --top-k 64 --repeat-penalty 1.0 \
+  > /home/john/gemma_mtp_server.log 2>&1"
+
+# Note: -np must be 1 when using --model-draft (MTP requires a single slot).
+# Draft model is 444 MB (Janvitos/gemma-4-12B-it-qat-assistant-MTP-Q8_0-GGUF).
+# mmproj is mandatory for multimodal (image) input.
 ```
 
 **Bee/Qwen server (prebuilt CUDA 13.1, GPU mmproj, DFlash):**
@@ -385,8 +396,8 @@ python3 --version
 - Missing local Python package: phase4 prep/validation import fails; install `requirements-preprocessing.txt`.
 - Missing HF token or gated-model access: SpeakerID diarization fails; export `HF_TOKEN`/`HUGGINGFACE_TOKEN`.
 - Bee not running/unhealthy: synthesis preflight fails; check Bee server logs at `/home/john/bee_prebuilt_v031.log`.
-- Gemma not running/unhealthy: fast-pass Gemma enrichment errors; check Gemma server logs (`/home/john/gemma_server.log`) and verify `tmux ls | grep gemma`.
-- GPU memory pressure: check `nvidia-smi`. Both Bee (~24 GiB) + Gemma (~7 GiB) fit on RTX 5090 (~32 GiB).
+- Gemma not running/unhealthy: fast-pass Gemma enrichment errors; check Gemma server logs (`/home/john/gemma_mtp_server.log`) and verify `tmux ls | grep gemma`.
+- GPU memory pressure: check `nvidia-smi`. Both Bee (~20 GiB) + Gemma MTP (~11 GiB) fit on RTX 5090 (~32 GiB).
 
 ---
 
@@ -396,7 +407,7 @@ python3 --version
 
 2. **Qwen thinking/output contract (vLLM only):** vLLM Qwen3.6 NVFP4 requires `enable_thinking=False` + `response_format=json_object` to produce usable output. BeeLlama handles thinking mode correctly. Only relevant if the backend switches back to vLLM.
 
-3. **Gemma concurrent workers:** Default is `GEMMA_CONCURRENT_WORKERS=3` with `-np 3` on Gemma. Tuning this higher may help further if ffmpeg audio extraction becomes the bottleneck. Active WSL backend is the Unsloth QAT GGUF (`UD-Q4_K_XL`).
+3. **Gemma concurrent workers vs MTP:** Default is `GEMMA_CONCURRENT_WORKERS=3`. When using `--model-draft` (MTP), `-np` must be `1`, so `GEMMA_CONCURRENT_WORKERS` should also be `1`. The MTP draft-model path serializes window processing. Non-MTP mode supports `-np 3 + GEMMA_CONCURRENT_WORKERS=3` for parallel window processing.
 
 4. **Audio phase (Omni 7B) not validated on this RTX 5090 stack:** Currently gated behind `--skip-audio`. The Omni container and audio pipeline are carryover from a 3090/vLLM era and may need revalidation on the current setup.
 
@@ -409,3 +420,5 @@ python3 --version
 - `docs/plans/fastpass.md` (Gemma fast-pass; Qwen+Bee backend guidance)
 - `scripts/start_bee_prebuilt_wsl.sh` (Bee launch helper for current working config)
 - `~/.hermes/skills/mlops/clip-intelligence-pipeline/SKILL.md`
+- [llama.cpp PR #23398](https://github.com/ggml-org/llama.cpp/pull/23398) — Gemma 4 MTP (merged June 07, 2026)
+- [Janvitos MTP draft model](https://huggingface.co/Janvitos/gemma-4-12B-it-qat-assistant-MTP-Q8_0-GGUF)
