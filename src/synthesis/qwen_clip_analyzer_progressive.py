@@ -210,6 +210,31 @@ def _as_int(value, default=0):
         return int(default)
 
 
+def _format_hms(seconds: float) -> str:
+    """Convert seconds to HH:MM:SS format."""
+    s = int(abs(seconds))
+    h, s = s // 3600, s % 3600
+    m, s = s // 60, s % 60
+    sign = "-" if seconds < 0 else ""
+    return f"{sign}{h}:{m:02d}:{s:02d}"
+
+
+def _add_hms_format(clips: list[dict]) -> None:
+    """Add ``_hms`` variants of timestamp fields to each clip record (in-place).
+
+    Adds ``start_hms``, ``end_hms``, ``suggested_trim_start_hms``,
+    ``suggested_trim_end_hms`` if the corresponding seconds field exists.
+    """
+    for clip in clips:
+        for field in ("start", "end", "suggested_trim_start", "suggested_trim_end"):
+            val = clip.get(field)
+            if val is not None:
+                try:
+                    clip[f"{field}_hms"] = _format_hms(int(float(val)))
+                except (ValueError, TypeError):
+                    pass
+
+
 def qwen_call(payload, timeout=180):
     """POST payload to Qwen vLLM endpoint. Returns parsed JSON content."""
     import requests
@@ -1882,7 +1907,10 @@ def run():
     selected = final_synthesis.get("final_selected_clips", [])
     log(f"Final selection: {len(selected)} clip(s)")
     for s in selected:
-        log(f"  Rank {s.get('rank','?')}: {s.get('start','?')}s — score={s.get('score','?')}/10 — {(s.get('intelligence_report') or {}).get('why_selected','')[:100]}")
+        start = s.get('start', '?')
+        hms = s.get('start_hms', '')
+        pos = f"{start}s ({hms})" if hms else f"{start}s"
+        log(f"  Rank {s.get('rank','?')}: {pos} — score={s.get('score','?')}/10 — {(s.get('intelligence_report') or {}).get('why_selected','')[:100]}")
 
     # ── Post-process: narrow clips using audio RMS energy peaks ──
     log(f"\n{'='*60}")
@@ -2073,6 +2101,9 @@ def run():
             )
 
     selected = rescored_selected
+
+    # Add HH:MM:SS format timestamps to selected clips for the report.
+    _add_hms_format(selected)
 
     # Re-save with narrowed boundaries and rescored eligibility.
     if rms_rejected_clips:
