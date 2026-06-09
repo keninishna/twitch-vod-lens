@@ -219,11 +219,29 @@ def _format_hms(seconds: float) -> str:
     return f"{sign}{h}:{m:02d}:{s:02d}"
 
 
-def _add_hms_format(clips: list[dict]) -> None:
-    """Add ``_hms`` variants of timestamp fields to each clip record (in-place).
+def _format_twitch_ts(seconds: float) -> str:
+    """Convert seconds to Twitch URL timestamp format (e.g. 1h44m31s)."""
+    s = int(abs(seconds))
+    if s == 0:
+        return "0s"
+    h, s = s // 3600, s % 3600
+    m, s = s // 60, s % 60
+    parts = []
+    if h:
+        parts.append(f"{h}h")
+    if m:
+        parts.append(f"{m}m")
+    if s or not (h or m):
+        parts.append(f"{s}s")
+    return "".join(parts)
+
+
+def _add_hms_and_links(clips: list[dict], vod_id: str) -> None:
+    """Add ``_hms`` variants and ``vod_url`` fields to each clip record (in-place).
 
     Adds ``start_hms``, ``end_hms``, ``suggested_trim_start_hms``,
-    ``suggested_trim_end_hms`` if the corresponding seconds field exists.
+    ``suggested_trim_end_hms``, and ``vod_url`` (linking to the VOD at the
+    clip window start) if the corresponding seconds field exists.
     """
     for clip in clips:
         for field in ("start", "end", "suggested_trim_start", "suggested_trim_end"):
@@ -233,6 +251,17 @@ def _add_hms_format(clips: list[dict]) -> None:
                     clip[f"{field}_hms"] = _format_hms(int(float(val)))
                 except (ValueError, TypeError):
                     pass
+        # Add VOD link at window start
+        raw_start = clip.get("start")
+        if raw_start is not None:
+            try:
+                ts = _format_twitch_ts(int(float(raw_start)))
+                clip["vod_url"] = f"https://www.twitch.tv/videos/{vod_id}?t={ts}"
+            except (ValueError, TypeError):
+                pass
+
+
+VOD_ID: str = "0001"
 
 
 def qwen_call(payload, timeout=180):
@@ -2103,7 +2132,7 @@ def run():
     selected = rescored_selected
 
     # Add HH:MM:SS format timestamps to selected clips for the report.
-    _add_hms_format(selected)
+    _add_hms_and_links(selected, VOD_ID)
 
     # Re-save with narrowed boundaries and rescored eligibility.
     if rms_rejected_clips:
