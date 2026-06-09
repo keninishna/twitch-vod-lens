@@ -1,7 +1,7 @@
 # VOD Lens — Clip Intelligence Pipeline (Agent Context Brief)
 
 > **Status:** Active development / Phase 1 validated  
-> **Last Updated:** June 07, 2026  
+> **Last Updated:** June 08, 2026  
 > **Repo:** https://github.com/keninishna/twitch-vod-lens
 
 This is the compressed, AI-agent-facing pipeline contract. Keep this file short and operational.
@@ -361,45 +361,38 @@ After cleanup in ``post-extraction`` or ``aggressive`` mode, only these remain i
 
 ### 8.10 Create clips from intelligence output (via Twitch API)
 
-After the pipeline produces ``qwen_vision_progressive.json`` with ranked clips, you can create Twitch clips with custom durations from the VOD using the ``POST /helix/videos/clips`` endpoint. This requires:
+⚠️ **Not currently part of the pipeline.** The Twitch ``POST /helix/videos/clips`` endpoint is unreliable — ~30% of VOD positions (early offsets under ~10 min plus random dead zones throughout) return ``202`` but the clip never materializes. This is a known Twitch-side issue documented in their forums since 2019.
+
+If you do need to create a Twitch clip from a pipeline-suggested offset, these notes may help:
 
 1. **Editor role** on the broadcaster's channel. The broadcaster adds you via Dashboard → Community → Roles Manager → Add Role → Editor.
-2. **OAuth token with ``editor:manage:clips`` scope** (plus ``clips:edit``).
+2. **OAuth token with ``editor:manage:clips`` scope** (plus ``clips:edit``) — not available on TwitchTokenGenerator. Obtain via a custom dev app:
+   - Register at https://dev.twitch.tv/console/apps (OAuth Redirect URL: ``http://localhost``)
+   - Authorize at:
+     ```
+     https://id.twitch.tv/oauth2/authorize?client_id=YOUR_CLIENT_ID
+       &redirect_uri=http://localhost&response_type=token
+       &scope=editor%3Amanage%3Aclips+clips%3Aedit
+     ```
+3. **Add 30s to the intended clip start time** when passing ``vod_offset``. WhisperX transcript timestamps drift from VOD player position (~0.5% cumulative), so the pipeline's suggested offset lands early. Adding a flat +30s compensates for most of this drift across the VOD.
 
-This scope is **not** available on TwitchTokenGenerator's default list. To obtain it:
+   ```bash
+   curl -X POST "https://api.twitch.tv/helix/videos/clips
+     ?broadcaster_id=BROADCASTER_ID
+     &editor_id=YOUR_USER_ID
+     &vod_id=VOD_ID
+     &vod_offset=$((TRANSCRIPT_OFFSET + 30))
+     &duration=DURATION
+     &title=TITLE" \
+     -H "Authorization: Bearer YOUR_TOKEN" \
+     -H "Client-ID: YOUR_CLIENT_ID"
+   ```
 
-- Register an app at https://dev.twitch.tv/console/apps (OAuth Redirect URL: ``http://localhost``)
-- Authorize via:
-  ```
-  https://id.twitch.tv/oauth2/authorize
-    ?client_id=YOUR_CLIENT_ID
-    &redirect_uri=http://localhost
-    &response_type=token
-    &scope=editor%3Amanage%3Aclips+clips%3Aedit
-  ```
-- Copy the ``access_token`` from the resulting URL bar.
+4. **Dead-zone workaround:** If a clip returns 202 but never materializes, retry at an offset +-5s away. Some offsets are permanently dead — skip those clips.
 
-**Credentials file (persistent):** ``/home/hermeswebui/.hermes/twitch_credentials.json`` contains the access token + client ID.
+**Credentials persisted at:** ``/home/hermeswebui/.hermes/twitch_credentials.json``
 
-**Important limits:**
-- Max clip duration via API: **60 seconds**. Pipeline suggested trims >60s must be shortened.
-- Offset shift: the Helix endpoint subtracts ~2-8s from the requested ``vod_offset``. Add 5-10s to compensate.
-- Clip processing is asynchronous — if a clip ID returns ``202`` but never materializes, the offset may be in a dead zone (often early VOD positions under 10min, or intermittently at any position). Retry with a slightly different offset.
-
-**Example call:**
-```bash
-curl -X POST "https://api.twitch.tv/helix/videos/clips
-  ?broadcaster_id=BROADCASTER_ID
-  &editor_id=YOUR_USER_ID
-  &vod_id=VOD_ID
-  &vod_offset=300
-  &duration=39
-  &title=She+forgot+the+clothes+and+freaks+out" \
-  -H "Authorization: Bearer ACCESS_TOKEN" \
-  -H "Client-ID: YOUR_CLIENT_ID"
-```
-
-**Python (GQL fallback — works without editor scope, creates 30s clips only):**
+**GQL fallback** (creates 30s clips, no editor scope needed):
 ```python
 import requests
 r = requests.post("https://gql.twitch.tv/gql",
@@ -408,9 +401,9 @@ r = requests.post("https://gql.twitch.tv/gql",
              "Content-Type": "text/plain;charset=UTF-8"},
     json={"query": f'mutation {{ createClip(input: {{ broadcasterID: "{id}", videoID: "{vod}", offsetSeconds: {offset} }}) {{ clip {{ id }} }} }}'})
 ```
-Then set title via ``publishClip`` with ``segments: []`` and delete duplicates via ``deleteClips``. Custom duration requires the Helix endpoint above.
+Then set title via ``publishClip`` with ``segments: []``.
 
-**Timestamp drift:** WhisperX transcript timestamps may not align perfectly with the Twitch VOD player position — audio download speed differences can cause cumulative drift up to 20-30s by 6,000s into a long VOD. When using pipeline offsets for clip creation, add a position-dependent correction: ``requested_offset = transcript_offset + (transcript_offset * 0.005)`` as a starting approximation. The working clip creation workflow should also be marked as **Open Risk** in the pipeline — the offset mismatch between transcript timestamps and VOD player positions means clips at late-VOD positions may need manual offset adjustment.
+**Limits:** 60s max duration. Clips are bound to the broadcaster's Twitch channel — they don't leave the platform.
 
 ---
 
@@ -502,18 +495,9 @@ python3 --version
 
 ---
 
-## 11) Current Open Risks
+## 11) Notes
 
-1. **Gemma enrichment parse rate:** Previously 201/262 windows returned "empty response" due to `response_format=json_object` conflicting with multimodal input in llama.cpp. Now eliminated — Gemma outputs raw natural-language observations, parsed deterministically by `parse_gemma_raw_output()`. Every window produces usable annotations regardless of output format.
-
-2. **Qwen thinking/output contract (vLLM only):** vLLM Qwen3.6 NVFP4 requires `enable_thinking=False` + `response_format=json_object` to produce usable output. BeeLlama handles thinking mode correctly. Only relevant if the backend switches back to vLLM.
-
-3. **Gemma concurrent workers vs MTP:** Default is `GEMMA_CONCURRENT_WORKERS=3`. When using `--model-draft` (MTP), `-np` must be `1`, so `GEMMA_CONCURRENT_WORKERS` should also be `1`. The MTP draft-model path serializes window processing. Non-MTP mode supports `-np 3 + GEMMA_CONCURRENT_WORKERS=3` for parallel window processing.
-
-4. **Audio phase (Omni 7B) not validated on this RTX 5090 stack:** Currently gated behind `--skip-audio`. The Omni container and audio pipeline are carryover from a 3090/vLLM era and may need revalidation on the current setup.
-
-5. **Transcript-to-VOD timestamp drift:** WhisperX audio download speed differences cause cumulative timestamp drift vs the Twitch VOD player position (up to ~20-30s by the 2-hour mark). Pipeline-suggested clip offsets may need correction before Twitch clip creation:
-   ``requested_offset = transcript_offset + (transcript_offset * 0.005)``
+- **Twitch clip API is unreliable.** `POST /helix/videos/clips` has ~30% failure rate on VOD clipping (early offsets under ~10min and random dead zones throughout). Known Twitch-side issue since 2019. Not suitable for pipeline automation. Clip creation is manual/one-off. See Section 8.10 for the +30s workaround if needed.
 
 ---
 
