@@ -67,7 +67,7 @@ def ensure_gemma_api_ready(
         "--port", "8084",
         "--model", model_path,
         "--mmproj", mmproj_path,
-        "-c", "4096",
+        "-c", "32768",
         "-ngl", "999",
         "--no-mmap",
         "--flash-attn", "on",
