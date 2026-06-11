@@ -57,8 +57,8 @@ def ensure_gemma_api_ready(
     if not mmproj_path:
         mmproj_path = "/home/john/models/gemma-4-12b/mmproj-F16.gguf"
 
-    draft_path = "/home/john/models/gemma-4-12b/gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf"
-    has_draft = os.path.isfile(draft_path)
+    # MTP draft model (gemma4-assistant arch) only works in llama.cpp-mtp fork
+    # which was cleaned up. Upstream builds don't support this arch.
     is_new_build = "build/bin/llama-server" in str(gemma_bin)
 
     cmd = [
@@ -74,19 +74,7 @@ def ensure_gemma_api_ready(
         "--reasoning", "on",
         "--no-host",
     ]
-
-    # New build supports MTP draft model with multimodal (bug fixed June 7, 2026)
-    if is_new_build and has_draft:
-        cmd.extend([
-            "--model-draft", draft_path,
-            "--spec-type", "draft-mtp",
-            "--spec-draft-n-max", "4",
-        ])
-        logger("Using new build with MTP draft model (multimodal supported).")
-    elif is_new_build:
-        logger("New build found but no draft model available — running without MTP.")
-    else:
-        logger("Using build_compat (no MTP draft — multimodal + draft was a known bug).")
+    logger(f"Using {'new build' if is_new_build else 'build_compat'} at {gemma_bin}")
 
     # Check if already running
     endpoint = f"{base_url.rstrip('/')}/v1/models"
