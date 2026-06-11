@@ -1,7 +1,7 @@
 # VOD Lens — Clip Intelligence Pipeline (Agent Context Brief)
 
 > **Status:** Active development / Phase 1 validated  
-> **Last Updated:** June 08, 2026  
+> **Last Updated:** June 11, 2026  
 > **Repo:** https://github.com/keninishna/twitch-vod-lens
 
 This is the compressed, AI-agent-facing pipeline contract. Keep this file short and operational.
@@ -45,10 +45,14 @@ Post++ Optional artifact cleanup (intermediate or post-extraction)
 
 **Fast-pass status (June 07):** Validated end-to-end on real VOD `2788478641` (197 clips, ~6.5 hr VOD). Gemma enrichment processed 262 windows, ~90 min total (Gemma + Qwen synthesis). Gemma 4 MTP support (PR #23398) was merged into upstream `llama.cpp` master on June 07, 2026. Multimodal MTP (images + draft model) works correctly — the draft-context sequence position bug is resolved. Gemma MTP achieves **~313 T/s predicted** on RTX 5090 with 77% draft acceptance. Raw text observations + deterministic Python parser (`parse_gemma_raw_output`) eliminates all parse failures. Concurrency (`GEMMA_CONCURRENT_WORKERS=3`) reduces Gemma enrichment wall time ~3×.
 
-**Runtime stack:**
-- **Gemma 4 12B** → latest `llama.cpp` master (PR #23398 merged) on port **8084** using **Unsloth QAT GGUF** (`gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` + `mmproj-F16.gguf` + `gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf` draft model) with `--spec-type draft-mtp --spec-draft-n-max 4 --reasoning on`. Built from source for Blackwell RTX 5090 (`-DCMAKE_CUDA_ARCHITECTURES=89-real;90-virtual`).
-- **Qwen 3.6 27B DFlash** → BeeLlama v0.3.1 prebuilt CUDA 13.1 on port **8082** (GPU mmproj, `--reasoning on`).
-- Both run on WSL2 / RTX 5090, fit in ~32 GiB VRAM (Gemma MTP ~11 GiB + Bee ~20 GiB).
+**Runtime stack (sequential loading):**
+- **Gemma 4 12B** → `build_compat` `llama-server` on port **8084** using **Unsloth QAT GGUF** (`gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` + `mmproj-F16.gguf`). No MTP draft model — multimodal + draft is a known bug. Context 4096, no-mmap, flash-attn.
+- **Qwen 3.6 27B DFlash** → BeeLlama v0.3.1 prebuilt CUDA 13.1 on port **8082** (GPU mmproj, `--reasoning on`, `--ctx-size 102400`).
+- Both backends **never run simultaneously**. Pipeline loads them sequentially:
+  1. Fast-pass path: Gemma loaded first → enrichment → Gemma killed → Bee loaded → Qwen vision
+  2. Standard path: only Bee loaded (Gemma not needed)
+- Managed by `ensure_gemma_api_ready()` / `shutdown_gemma()` in `gemma_enrichment.py` and `ensure_bee_api_ready()` in `bee_server.py`.
+- Both require `LD_LIBRARY_PATH` to include `/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib` for CUDA backend discovery. The `start_bee_prebuilt_wsl.sh` script handles this; `ensure_gemma_api_ready()` passes it via explicit `env` param.
 
 ---
 
@@ -238,54 +242,36 @@ python src/synthesis/extract_and_upload_clips.py \
 GEMMA_CONCURRENT_WORKERS=1 PYTHONPATH=. python3 src/synthesis/qwen_clip_analyzer_progressive.py ...
 ```
 
-### 8.7 Starting the backends (launch before pipeline runs)
+### 8.7 Starting the backends (sequential — never both at once)
 
-**Gemma server (MTP-enabled, latest llama.cpp master with PR #23398):**
+Backends are loaded **sequentially** to avoid VRAM contention. The pipeline manages this automatically — you only need to ensure the environment has the CUDA library path:
+
 ```bash
-# Build from source (one-time):
-git clone https://github.com/ggml-org/llama.cpp.git
-git checkout master
-cmake -B build -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=OFF -DCMAKE_CUDA_ARCHITECTURES="89-real;90-virtual"
-cmake --build build --config Release -j$(nproc)
-
-# Launch in tmux (keep alive on WSL):
-tmux new-session -d -s gemma "cd /home/john && \
-  /home/john/llama.cpp-mtp/build/bin/llama-server \
-  -m /home/john/models/gemma-4-12b/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
-  --model-draft /home/john/models/gemma-4-12b/gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf \
-  --mmproj /home/john/models/gemma-4-12b/mmproj-F16.gguf \
-  --spec-type draft-mtp --spec-draft-n-max 4 \
-  --host 0.0.0.0 --port 8084 \
-  -ngl all -np 1 --kv-unified -c 32768 \
-  -b 2048 -ub 512 -fa on --jinja --reasoning on \
-  --temp 0.2 --top-p 0.95 --top-k 64 --repeat-penalty 1.0 \
-  > /home/john/gemma_mtp_server.log 2>&1"
-
-# Note: -np must be 1 when using --model-draft (MTP requires a single slot).
-# Draft model is 444 MB (Janvitos/gemma-4-12B-it-qat-assistant-MTP-Q8_0-GGUF).
-# mmproj is mandatory for multimodal (image) input.
+export LD_LIBRARY_PATH="/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib:${LD_LIBRARY_PATH:-}"
 ```
 
-**Bee/Qwen server (prebuilt CUDA 13.1, GPU mmproj, DFlash):**
+**Gemma server (fast-pass enrichment only, no MTP draft):**
+```bash
+# Launch in tmux (keep alive on WSL):
+tmux new-session -d -s gemma "cd /home/john && \\
+  LD_LIBRARY_PATH=/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib \\
+  /home/john/llama.cpp/build_compat/bin/llama-server \\
+  --host 0.0.0.0 --port 8084 \\
+  --model /home/john/models/gemma-4-12b/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \\
+  --mmproj /home/john/models/gemma-4-12b/mmproj-F16.gguf \\
+  -c 4096 -ngl 999 --no-mmap --flash-attn on --reasoning on --no-host \\
+  > /home/john/gemma_mtp_server.log 2>&1"
+
+# Or let the pipeline auto-start via ensure_gemma_api_ready() with --fast-pass.
+# ensure_gemma_api_ready() passes LD_LIBRARY_PATH via explicit env param
+# and redirects output to /home/john/gemma_mtp_server.log.
+```
+
+**Bee/Qwen server (all paths):**
 ```bash
 # Launch script at: ~/twitch-vod-analyzer/scripts/start_bee_prebuilt_wsl.sh
 bash ~/twitch-vod-analyzer/scripts/start_bee_prebuilt_wsl.sh
-
-# Equivalent manual launch:
-export LD_LIBRARY_PATH="/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib:/home/john/beellama-prebuilt/v0.3.1:${LD_LIBRARY_PATH:-}"
-nohup /home/john/beellama-prebuilt/v0.3.1/llama-server \
-  -m /home/john/models/bee-qwen36-27b/Qwen3.6-27B-Q5_K_S.gguf \
-  --mmproj /home/john/models/bee-qwen36-27b/mmproj-BF16.gguf \
-  --spec-draft-model /home/john/models/bee-qwen36-27b/dflash-draft-3.6-q4_k_m.gguf \
-  --spec-type dflash --spec-dflash-cross-ctx 1024 \
-  --host 0.0.0.0 --port 8082 -np 1 --kv-unified \
-  -ngl all --spec-draft-ngl all \
-  -b 2048 -ub 512 --ctx-size 102400 \
-  --cache-type-k q5_0 --cache-type-v q4_1 \
-  --flash-attn on --jinja --no-mmap --mlock --no-host \
-  --reasoning on --chat-template-kwargs '{"preserve_thinking":true}' \
-  --temp 0.6 --top-k 20 --top-p 1.0 --min-p 0.0 \
-  > /home/john/bee_prebuilt_v031.log 2>&1 &
+# This sets LD_LIBRARY_PATH internally and writes logs to /home/john/bee_prebuilt_v031.log
 ```
 
 Optional modes:
@@ -479,10 +465,10 @@ python3 --version
 ```
 
 ### 10.5 WSL validation workflow
-1. Run readiness checks and confirm both backend servers are healthy.
+1. Run readiness checks and confirm tools/tools are available.
 2. Prepare and validate a single phase4 VOD.
-3. Run the Gemma smoke test (`scripts/smoke_test_gemma12b_llamacpp.py`).
-4. Run a full fast-pass synthesis pass.
+3. Run the Gemma smoke test (`scripts/smoke_test_gemma12b_llamacpp.py`) — this verifies Gemma can load on GPU.
+4. Run a full fast-pass synthesis pass (sequential loading: Gemma → enrichment → shutdown → Bee → Qwen vision).
 5. Inspect `qwen_vision_progressive.json` for `final_ranking.final_selected_clips` and `rejected_clips`.
 
 ### 10.6 Failure diagnosis
@@ -491,7 +477,7 @@ python3 --version
 - Missing HF token or gated-model access: SpeakerID diarization fails; export `HF_TOKEN`/`HUGGINGFACE_TOKEN`.
 - Bee not running/unhealthy: synthesis preflight fails; check Bee server logs at `/home/john/bee_prebuilt_v031.log`.
 - Gemma not running/unhealthy: fast-pass Gemma enrichment errors; check Gemma server logs (`/home/john/gemma_mtp_server.log`) and verify `tmux ls | grep gemma`.
-- GPU memory pressure: check `nvidia-smi`. Both Bee (~20 GiB) + Gemma MTP (~11 GiB) fit on RTX 5090 (~32 GiB).
+- GPU memory pressure: check `nvidia-smi`. Backends load sequentially — only one is in VRAM at a time. Gemma (~11 GiB) loads first for enrichment, then is killed before Bee (~20 GiB) starts. Never both simultaneously. If Bee fails to start after Gemma, check that `shutdown_gemma()` freed VRAM and the CUDA library path (`LD_LIBRARY_PATH`) includes `/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib`.
 
 ---
 
