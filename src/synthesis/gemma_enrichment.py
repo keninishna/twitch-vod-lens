@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -17,6 +18,131 @@ from src.synthesis.fastpass_triage import (
     normalize_gemma_annotation,
     summarize_gemma_signals_for_triage,
 )
+
+
+def ensure_gemma_api_ready(
+    base_url: str = "http://localhost:8084",
+    gemma_bin: str = "",
+    model_path: str = "",
+    mmproj_path: str = "",
+    timeout: int = 600,
+    check_interval: int = 5,
+    logger=print,
+) -> bool:
+    """Start Gemma server and wait for it to be reachable.
+
+    Starts ``llama-server`` with the Gemma QAT model, no MTP draft
+    (known multimodal bug with draft model), and flags that leave
+    maximum VRAM headroom for Bee after Gemma finishes.
+
+    Returns ``True`` if Gemma becomes reachable within *timeout*.
+    """
+    import shutil
+
+    # Auto-discover paths on WSL if not explicitly provided
+    if not gemma_bin:
+        candidates = [
+            "/home/john/llama.cpp/build_compat/bin/llama-server",
+            "/home/john/llama.cpp/build/bin/llama-server",
+        ]
+        gemma_bin = next((p for p in candidates if os.path.isfile(p)), "")
+    if not model_path:
+        model_path = "/home/john/models/gemma-4-12b/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"
+    if not mmproj_path:
+        mmproj_path = "/home/john/models/gemma-4-12b/mmproj-F16.gguf"
+
+    cmd = [
+        gemma_bin,
+        "--host", "0.0.0.0",
+        "--port", "8084",
+        "--model", model_path,
+        "--mmproj", mmproj_path,
+        "-c", "4096",
+        "-ngl", "999",
+        "--no-mmap",
+        "--flash-attn", "on",
+        "--reasoning", "on",
+        "--no-host",
+    ]
+
+    # Check if already running
+    endpoint = f"{base_url.rstrip('/')}/v1/models"
+    try:
+        req = requests.get(endpoint, timeout=5)
+        if req.status_code < 400:
+            logger("Gemma API is already reachable — no restart needed.")
+            return True
+    except requests.ConnectionError:
+        pass
+
+    logger(f"Starting Gemma server: {' '.join(cmd)}")
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            req = requests.get(endpoint, timeout=10)
+            if req.status_code < 400:
+                logger(f"Gemma API ready at {endpoint} after {int(time.time() - deadline + timeout)}s")
+                return True
+        except requests.ConnectionError:
+            pass
+        time.sleep(check_interval)
+
+    logger(f"Gemma API failed to start within {timeout}s at {endpoint}.")
+    process.kill()
+    return False
+
+
+def shutdown_gemma(
+    base_url: str = "http://localhost:8084",
+    pid_file: str | None = None,
+    logger=print,
+) -> None:
+    """Shut down the Gemma server to free VRAM for Bee.
+
+    Tries a graceful shutdown via the API endpoint first, then
+    falls back to ``pkill`` scoped to the Gemma binary and port.
+    """
+    # Try graceful API shutdown
+    try:
+        req = requests.post(f"{base_url.rstrip('/')}/shutdown", timeout=5)
+        if req.status_code < 400:
+            logger("Gemma shutdown via API succeeded.")
+            return
+    except requests.ConnectionError:
+        pass
+
+    # Fallback: kill by binary name + port signature
+    import signal
+    try:
+        # Kill process listening on port 8084
+        result = subprocess.run(
+            ["fuser", "-k", "-n", "tcp", "8084"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        logger("Gemma killed via fuser -k on port 8084.")
+        time.sleep(2)
+        return
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        pass
+
+    # Last resort: pkill (broad)
+    try:
+        subprocess.run(
+            ["pkill", "-f", "gemma-4-12B-it-qat-UD-Q4_K_XL"],
+            capture_output=True,
+            timeout=10,
+        )
+        logger("Gemma killed via pkill.")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        logger("WARN: could not kill Gemma process.")
 
 
 def build_gemma_enrichment_prompt(window: dict) -> str:

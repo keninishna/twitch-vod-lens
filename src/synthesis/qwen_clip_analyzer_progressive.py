@@ -62,7 +62,11 @@ from src.synthesis.fastpass_triage import (
     select_vision_shortlist,
     summarize_gemma_signals_for_triage,
 )
-from src.synthesis.gemma_enrichment import run_gemma_enrichment
+from src.synthesis.gemma_enrichment import (
+    ensure_gemma_api_ready,
+    run_gemma_enrichment,
+    shutdown_gemma,
+)
 
 # ── Configuration (tweak per VOD / model) ────────────────────────────
 
@@ -1273,28 +1277,6 @@ def _build_fast_pass_artifacts(*, fusion: dict, manifest: dict, clips: list[dict
 def run():
     log(f"Loading data for VOD {VOD_ID} ...")
 
-    # Standard path: Bee is required before Stage 1. Fast-pass can defer Bee
-    # startup until after Gemma enrichment to maximize Gemma GPU headroom.
-    if not FAST_PASS:
-        preflight = ensure_bee_api_ready(
-            base_url=BEE_URL,
-            start_bee=START_BEE,
-            start_command=BEE_START_COMMAND,
-            timeout=300,
-            check_interval=5,
-            logger=lambda message: log(f"  {message}"),
-        )
-        if not preflight.ready:
-            log("ERROR: Bee API preflight failed; aborting before Stage 1.")
-            print(preflight.message)
-            if not START_BEE:
-                print("Hint: re-run with --start-bee and optionally --bee-start-command '<command>'.")
-            sys.exit(2)
-        if preflight.started:
-            log(f"Bee API managed startup succeeded at {bee_models_url()}")
-        else:
-            log(f"Bee API already reachable at {bee_models_url()}")
-
     fusion = load_json(FUSION_PATH)
     manifest = load_json(CLIP_MANIFEST_PATH)
 
@@ -1320,6 +1302,19 @@ def run():
     fast_pass_state = None
     fast_pass_run_started_at = None
     if FAST_PASS or FAST_PASS_DRY_RUN or GEMMA_SMOKE_TEST_ONLY:
+        # Ensure Gemma is running before fast-pass enrichment.
+        # We start Gemma first (no MTP draft — known multimodal bug)
+        # and shut it down after enrichment to free VRAM for Bee.
+        gemma_ready = ensure_gemma_api_ready(
+            base_url=GEMMA_URL,
+            timeout=600,
+            check_interval=5,
+            logger=lambda message: log(f"  {message}"),
+        )
+        if not gemma_ready:
+            log("ERROR: Gemma API failed to start; aborting fast-pass.")
+            sys.exit(2)
+
         fast_pass_run_started_at = time.time()
         fast_pass_state = _build_fast_pass_artifacts(
             fusion=fusion,
@@ -1348,6 +1343,31 @@ def run():
             sys.exit(0)
         clips = list(fast_pass_state['vision_shortlist'])
         log(f"Fast-pass enabled: reduced clips from {original_clip_count} to {len(clips)}")
+
+        # Gemma enrichment is done — shut it down to free VRAM (~11 GiB)
+        # before starting Bee for Qwen vision.
+        shutdown_gemma(base_url=GEMMA_URL, logger=lambda message: log(f"  {message}"))
+
+    # Start Bee (required before Qwen vision batches).
+    # For fast-pass, Gemma has been shut down so Bee gets full VRAM headroom.
+    preflight = ensure_bee_api_ready(
+        base_url=BEE_URL,
+        start_bee=START_BEE,
+        start_command=BEE_START_COMMAND,
+        timeout=300,
+        check_interval=5,
+        logger=lambda message: log(f"  {message}"),
+    )
+    if not preflight.ready:
+        log("ERROR: Bee API preflight failed; aborting before Stage 1.")
+        print(preflight.message)
+        if not START_BEE:
+            print("Hint: re-run with --start-bee and optionally --bee-start-command '<command>'.")
+        sys.exit(2)
+    if preflight.started:
+        log(f"Bee API managed startup succeeded at {bee_models_url()}")
+    else:
+        log(f"Bee API already reachable at {bee_models_url()}")
 
     streamer_profile_context = (
         "STREAMER PROFILE CONTEXT (evidence-backed, advisory): unavailable for this run."
