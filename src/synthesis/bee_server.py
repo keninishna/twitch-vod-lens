@@ -79,10 +79,17 @@ def ensure_bee_api_ready(
     check_interval: int = 5,
     logger=print,
 ) -> BeeStartupResult:
-    """Ensure Bee API is reachable, optionally starting Bee when unavailable."""
+    """Ensure Bee API is reachable, optionally starting Bee when unavailable.
+
+    When ``start_bee=True``, uses a quick initial probe (2 checks) before
+    attempting to start the server, avoiding a ~5 min poll.
+    """
+    # Quick initial probe (only 2 checks) when auto-start is enabled.
+    # Avoids wasting 300s polling before starting Bee.
+    initial_timeout = 10 if start_bee else timeout
     if wait_for_bee_api(
         base_url=base_url,
-        timeout=timeout,
+        timeout=initial_timeout,
         check_interval=check_interval,
         logger=logger,
     ):
