@@ -48,14 +48,18 @@ def ensure_gemma_api_ready(
     # Auto-discover paths on WSL if not explicitly provided
     if not gemma_bin:
         candidates = [
-            "/home/john/llama.cpp/build_compat/bin/llama-server",
-            "/home/john/llama.cpp/build/bin/llama-server",
+            "/home/john/llama.cpp/build/bin/llama-server",       # latest build (MTP + multimodal fixed)
+            "/home/john/llama.cpp/build_compat/bin/llama-server", # old fallback (no MTP draft)
         ]
         gemma_bin = next((p for p in candidates if os.path.isfile(p)), "")
     if not model_path:
         model_path = "/home/john/models/gemma-4-12b/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"
     if not mmproj_path:
         mmproj_path = "/home/john/models/gemma-4-12b/mmproj-F16.gguf"
+
+    draft_path = "/home/john/models/gemma-4-12b/gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf"
+    has_draft = os.path.isfile(draft_path)
+    is_new_build = "build/bin/llama-server" in str(gemma_bin)
 
     cmd = [
         gemma_bin,
@@ -70,6 +74,19 @@ def ensure_gemma_api_ready(
         "--reasoning", "on",
         "--no-host",
     ]
+
+    # New build supports MTP draft model with multimodal (bug fixed June 7, 2026)
+    if is_new_build and has_draft:
+        cmd.extend([
+            "--model-draft", draft_path,
+            "--spec-type", "draft-mtp",
+            "--spec-draft-n-max", "4",
+        ])
+        logger("Using new build with MTP draft model (multimodal supported).")
+    elif is_new_build:
+        logger("New build found but no draft model available — running without MTP.")
+    else:
+        logger("Using build_compat (no MTP draft — multimodal + draft was a known bug).")
 
     # Check if already running
     endpoint = f"{base_url.rstrip('/')}/v1/models"
