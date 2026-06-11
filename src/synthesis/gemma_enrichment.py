@@ -82,10 +82,18 @@ def ensure_gemma_api_ready(
         pass
 
     logger(f"Starting Gemma server: {' '.join(cmd)}")
+    log_path = "/home/john/gemma_mtp_server.log"
+    log_fd = open(log_path, "w")
+    gemma_env = os.environ.copy()
+    if "LD_LIBRARY_PATH" not in gemma_env.get("LD_LIBRARY_PATH", ""):
+        cuda_lib = "/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib"
+        existing = gemma_env.get("LD_LIBRARY_PATH", "")
+        gemma_env["LD_LIBRARY_PATH"] = f"{cuda_lib}:{existing}" if existing else cuda_lib
     process = subprocess.Popen(
         cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_fd,
+        stderr=subprocess.STDOUT,
+        env=gemma_env,
     )
 
     deadline = time.time() + timeout
