@@ -39,6 +39,12 @@ def ensure_gemma_api_ready(
     """
     import shutil
 
+    # Set LD_LIBRARY_PATH so the build_compat llama-server can find CUDA
+    cuda_lib = "/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib"
+    if cuda_lib not in os.environ.get("LD_LIBRARY_PATH", ""):
+        existing = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = f"{cuda_lib}:{existing}" if existing else cuda_lib
+
     # Auto-discover paths on WSL if not explicitly provided
     if not gemma_bin:
         candidates = [
