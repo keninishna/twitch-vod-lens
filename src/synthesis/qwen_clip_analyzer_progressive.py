@@ -1154,18 +1154,18 @@ def _build_fast_pass_artifacts(*, fusion: dict, manifest: dict, clips: list[dict
         chunk["signal_summary"] = chunk.get("signal_summary") or {}
 
     gemma_result = None
-    if FAST_PASS_MODE == "text-only":
-        gemma_artifact = {
-            "backend": "disabled",
-            "windows": [],
-            "stats": {
-                "total_windows": 0,
-                "successful_windows": 0,
-                "failed_windows": 0,
-                "wall_clock_seconds": 0.0,
-            },
-        }
-    else:
+    gemma_artifact = {
+        "backend": "disabled" if FAST_PASS_MODE == "text-only" else "llama_cpp",
+        "windows": [],
+        "stats": {
+            "total_windows": 0,
+            "successful_windows": 0,
+            "failed_windows": 0,
+            "wall_clock_seconds": 0.0,
+        },
+    }
+
+    if FAST_PASS_MODE != "text-only":
         gemma_result = run_gemma_enrichment(
             base_url=GEMMA_URL,
             model=GEMMA_MODEL,
@@ -1183,21 +1183,6 @@ def _build_fast_pass_artifacts(*, fusion: dict, manifest: dict, clips: list[dict
             audio_max_seconds=GEMMA_AUDIO_MAX_SECONDS,
         )
         gemma_artifact = gemma_result["artifact"]
-
-    bee_ready = ensure_bee_api_ready(
-        base_url=BEE_URL,
-        start_bee=START_BEE,
-        start_command=BEE_START_COMMAND,
-        timeout=300,
-        check_interval=5,
-        logger=lambda message: log(f"  {message}"),
-    )
-    if not bee_ready.ready:
-        raise RuntimeError(bee_ready.message)
-    if bee_ready.started:
-        log(f"Bee API managed startup succeeded at {bee_models_url()}")
-    else:
-        log(f"Bee API already reachable at {bee_models_url()}")
 
     triage_candidates, triage_stats = _run_fast_pass_text_triage(
         triage_chunks=triage_chunks,
@@ -1304,52 +1289,54 @@ def run():
 
     fast_pass_state = None
     fast_pass_run_started_at = None
+    gemma_started = False
     if FAST_PASS or FAST_PASS_DRY_RUN or GEMMA_SMOKE_TEST_ONLY:
-        # Ensure Gemma is running before fast-pass enrichment.
-        # We start Gemma first (no MTP draft — known multimodal bug)
-        # and shut it down after enrichment to free VRAM for Bee.
-        gemma_ready = ensure_gemma_api_ready(
-            base_url=GEMMA_URL,
-            timeout=600,
-            check_interval=5,
-            logger=lambda message: log(f"  {message}"),
-        )
-        if not gemma_ready:
-            log("ERROR: Gemma API failed to start; aborting fast-pass.")
-            sys.exit(2)
+        if FAST_PASS_MODE != "text-only":
+            # Ensure Gemma is running before fast-pass enrichment.
+            # We start Gemma first (no MTP draft — known multimodal bug)
+            # and shut it down after enrichment to free VRAM for Bee.
+            gemma_ready = ensure_gemma_api_ready(
+                base_url=GEMMA_URL,
+                timeout=600,
+                check_interval=5,
+                logger=lambda message: log(f"  {message}"),
+            )
+            gemma_started = bool(gemma_ready)
+            if not gemma_started:
+                log("ERROR: Gemma API failed to start; aborting fast-pass.")
+                sys.exit(2)
 
-        fast_pass_run_started_at = time.time()
-        fast_pass_state = _build_fast_pass_artifacts(
-            fusion=fusion,
-            manifest=manifest,
-            clips=clips,
-            phase4_dir=VOD_DIR,
-            speaker_attribution=speaker_attribution,
-            dry_run=FAST_PASS_DRY_RUN or GEMMA_SMOKE_TEST_ONLY,
-        )
-        if FAST_PASS_DRY_RUN or GEMMA_SMOKE_TEST_ONLY:
-            log(f"Fast-pass dry-run complete: {fast_pass_state['gemma']['artifact_path']}")
-            log(f"  text triage: {fast_pass_state['text_triage_path']}")
-            log(f"  vision shortlist: {fast_pass_state['vision_shortlist_path']}")
-            output = {
-                "vod_id": VOD_ID,
-                "pipeline": "progressive-chunking-v2",
-                "fast_pass": {
-                    **fast_pass_state,
-                    "gemma_backend": fast_pass_state['gemma']['backend'],
-                },
-            }
-            OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(OUTPUT_PATH, "w") as f:
-                json.dump(output, f, indent=2)
-            log(f"Fast-pass dry-run results saved to {OUTPUT_PATH}")
-            sys.exit(0)
-        clips = list(fast_pass_state['vision_shortlist'])
-        log(f"Fast-pass enabled: reduced clips from {original_clip_count} to {len(clips)}")
-
-        # Gemma enrichment is done — shut it down to free VRAM (~11 GiB)
-        # before starting Bee for Qwen vision.
-        shutdown_gemma(base_url=GEMMA_URL, logger=lambda message: log(f"  {message}"))
+            try:
+                fast_pass_run_started_at = time.time()
+                fast_pass_state = _build_fast_pass_artifacts(
+                    fusion=fusion,
+                    manifest=manifest,
+                    clips=clips,
+                    phase4_dir=VOD_DIR,
+                    speaker_attribution=speaker_attribution,
+                    dry_run=FAST_PASS_DRY_RUN or GEMMA_SMOKE_TEST_ONLY,
+                )
+                if FAST_PASS_DRY_RUN or GEMMA_SMOKE_TEST_ONLY:
+                    log(f"Fast-pass dry-run complete: {fast_pass_state['gemma']['artifact_path']}")
+                    log(f"  text triage: {fast_pass_state['text_triage_path']}")
+                    log(f"  vision shortlist: {fast_pass_state['vision_shortlist_path']}")
+                    output = {
+                        "vod_id": VOD_ID,
+                        "pipeline": "progressive-chunking-v2",
+                        "fast_pass": {
+                            **fast_pass_state,
+                            "gemma_backend": fast_pass_state['gemma']['backend'],
+                        },
+                    }
+                    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    with open(OUTPUT_PATH, "w") as f:
+                        json.dump(output, f, indent=2)
+                    log(f"Fast-pass dry-run results saved to {OUTPUT_PATH}")
+                    sys.exit(0)
+                clips = list(fast_pass_state['vision_shortlist'])
+                log(f"Fast-pass enabled: reduced clips from {original_clip_count} to {len(clips)}")
+            finally:
+                shutdown_gemma(base_url=GEMMA_URL, logger=lambda message: log(f"  {message}"))
 
     # Start Bee (required before Qwen vision batches).
     # For fast-pass, Gemma has been shut down so Bee gets full VRAM headroom.

@@ -9,11 +9,12 @@ from src.synthesis.gemma_enrichment import (
 )
 
 
-def test_prompt_is_json_only_and_mentions_evidence_rules():
+def test_prompt_uses_labeled_sections_and_factual_annotations_only():
     prompt = build_gemma_enrichment_prompt({"start": 10, "end": 40})
-    assert "JSON only" in prompt
     assert "factual annotations only" in prompt
     assert "Do not make final clip decisions" in prompt
+    for label in ["AUDIO_EVENTS", "VISUAL_EVENTS", "SPEAKER", "EMOTION", "RISK_FLAGS"]:
+        assert label in prompt
 
 
 def test_payload_includes_image_url_and_input_audio(tmp_path):

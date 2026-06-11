@@ -362,6 +362,39 @@ def test_summarize_chunk_signals_reports_density_chat_count_and_manifest_coverag
 
 
 
+def test_build_gemma_annotation_windows_uses_stride_and_emits_tail_window():
+    windows = build_gemma_annotation_windows(
+        [],
+        [{"clip_id": "clip_stride", "start": 0, "end": 60}],
+        window_seconds=30,
+        stride_seconds=15,
+        max_windows=0,
+    )
+
+    assert [(w["start"], w["end"]) for w in windows] == [(0, 30), (15, 45), (30, 60)]
+
+    tail_windows = build_gemma_annotation_windows(
+        [],
+        [{"clip_id": "clip_tail", "start": 0, "end": 95}],
+        window_seconds=30,
+        stride_seconds=30,
+        max_windows=0,
+    )
+
+    assert [(w["start"], w["end"]) for w in tail_windows] == [(0, 30), (30, 60), (60, 90), (90, 95)]
+
+
+def test_build_gemma_annotation_windows_dedupes_duplicate_bounds_across_sources():
+    triage_chunks = [{"chunk_index": 0, "chunk_start": 0, "chunk_end": 30, "signal_summary": {"has_chat_spike": True, "signal_flags": ["chat_spike"]}}]
+    manifest_clips = [{"clip_id": "clip_a", "start": 0, "end": 30}]
+
+    windows = build_gemma_annotation_windows(triage_chunks, manifest_clips, window_seconds=30, stride_seconds=30, max_windows=0)
+
+    assert [(w["start"], w["end"]) for w in windows] == [(0, 30)]
+    assert {w["source"] for w in windows} == {"manifest_backed"}
+
+
+
 def test_build_gemma_annotation_windows_prefers_manifest_and_chat_spike_windows_deterministically():
     triage_chunks = [
         {
@@ -388,7 +421,7 @@ def test_build_gemma_annotation_windows_prefers_manifest_and_chat_spike_windows_
     assert [w["start"] for w in windows] == sorted(w["start"] for w in windows)
     assert any(w["source"] == "manifest_backed" and w["manifest_clip_id"] == "clip_a" for w in windows)
     assert any(w["source"] == "chat_spike" and w["chunk_index"] == 1 for w in windows)
-    assert any(w["source"] == "sentinel_coverage" for w in windows)
+    assert len({(w["start"], w["end"]) for w in windows}) == len(windows)
 
     capped = build_gemma_annotation_windows(triage_chunks, manifest_clips, window_seconds=30, stride_seconds=30, max_windows=2)
     assert len(capped) == 2
@@ -420,6 +453,17 @@ def test_build_gemma_audio_extract_command_uses_ffmpeg_and_caps_duration():
     assert "-c:a" in cmd and cmd[cmd.index("-c:a") + 1] == "pcm_s16le"
     assert cmd[-1] == "/tmp/out.wav"
     assert cmd[cmd.index("-t") + 1] == "30"
+
+
+def test_build_gemma_audio_extract_command_respects_configurable_max_seconds():
+    cmd = build_gemma_audio_extract_command(
+        "/vods/raw.mp4",
+        {"start": 100, "end": 150},
+        "/tmp/out.wav",
+        max_seconds=45,
+    )
+
+    assert cmd[cmd.index("-t") + 1] == "45"
 
 
 

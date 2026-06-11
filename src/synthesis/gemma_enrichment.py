@@ -359,8 +359,8 @@ def call_gemma_llamacpp(*, base_url: str, payload: dict, timeout: int) -> dict:
     }
 
 
-def _extract_window_audio(vod_mp4: str, window: dict, output_wav: str) -> None:
-    cmd = build_gemma_audio_extract_command(vod_mp4, window, output_wav)
+def _extract_window_audio(vod_mp4: str, window: dict, output_wav: str, *, max_seconds: int) -> None:
+    cmd = build_gemma_audio_extract_command(vod_mp4, window, output_wav, max_seconds=max_seconds)
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -393,7 +393,7 @@ def run_gemma_enrichment(*, base_url: str, model: str, phase4_dir: str, fusion: 
                     from src.synthesis.fastpass_triage import select_gemma_frames_for_window
                     image_paths = select_gemma_frames_for_window(window, frames_dir, frames_per_window=frames_per_window)
                 audio_path = td_path / f"{window['window_id']}.wav"
-                _extract_window_audio(raw_vod_path, window, str(audio_path))
+                _extract_window_audio(raw_vod_path, window, str(audio_path), max_seconds=audio_max_seconds)
                 prompt = build_gemma_enrichment_prompt(window)
                 payload = build_gemma_chat_payload(model=model, prompt=prompt, image_paths=image_paths, audio_path=str(audio_path), max_tokens=1200)
                 raw_response = call_gemma_llamacpp(base_url=base_url, payload=payload, timeout=timeout)

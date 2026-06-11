@@ -756,14 +756,14 @@ def build_gemma_annotation_windows(
     normalized_manifest = sorted(normalized_manifest, key=lambda clip: (clip["start"], clip["end"], clip["clip_id"]))
 
     windows: List[Dict[str, Any]] = []
-    seen = set()
+    seen_bounds = set()
 
-    def add_window(start: int, end: int, *, source: str, clip_id: str | None = None, chunk_index: int | None = None, manifest_clip_id: str | None = None, signal_flags: List[str] | None = None) -> None:
+    def add_window(start: int, end: int, *, source: str, clip_id: str | None = None, chunk_index: int | None = None, manifest_clip_id: str | None = None, signal_flags: List[str] | None = None) -> bool:
         start, end = _normalize_window(start, end, start, max(start + 1, end))
-        key = (start, end, source, clip_id or "", manifest_clip_id or "", chunk_index if chunk_index is not None else -1)
-        if key in seen:
-            return
-        seen.add(key)
+        key = (start, end)
+        if key in seen_bounds:
+            return False
+        seen_bounds.add(key)
         windows.append({
             "window_id": f"gemma_{start:07d}_{end:07d}",
             "start": start,
@@ -774,14 +774,21 @@ def build_gemma_annotation_windows(
             "manifest_clip_id": manifest_clip_id,
             "signal_flags": list(signal_flags or []),
         })
+        return True
+
+    def add_sliding_windows(start: int, end: int, *, source: str, manifest_clip_id: str | None = None, chunk_index: int | None = None, signal_flags: List[str] | None = None) -> None:
+        cursor = max(0, start)
+        upper = max(cursor + 1, end)
+        limit = max(1, window_seconds)
+        while cursor < upper:
+            window_end = min(cursor + limit, upper)
+            add_window(cursor, window_end, source=source, manifest_clip_id=manifest_clip_id, chunk_index=chunk_index, signal_flags=signal_flags)
+            if window_end >= upper:
+                break
+            cursor += stride_seconds
 
     for clip in normalized_manifest:
-        add_window(
-            clip["start"],
-            min(clip["end"], clip["start"] + window_seconds),
-            source="manifest_backed",
-            manifest_clip_id=clip["clip_id"],
-        )
+        add_sliding_windows(clip["start"], clip["end"], source="manifest_backed", manifest_clip_id=clip["clip_id"])
 
     for chunk in triage_chunks or []:
         if not isinstance(chunk, dict):
@@ -792,30 +799,18 @@ def build_gemma_annotation_windows(
         chunk_end = _as_int(chunk.get("chunk_end"), chunk_start + window_seconds)
         chunk_index = chunk.get("chunk_index") if isinstance(chunk.get("chunk_index"), int) else None
         if summary.get("has_chat_spike") or "chat_spike" in flags:
-            add_window(
-                chunk_start,
-                min(chunk_end, chunk_start + window_seconds),
-                source="chat_spike",
-                chunk_index=chunk_index,
-                signal_flags=flags,
-            )
+            add_sliding_windows(chunk_start, chunk_end, source="chat_spike", chunk_index=chunk_index, signal_flags=flags)
 
     if normalized_manifest and (max_windows == 0 or len(windows) < max_windows):
         target_count = max(1, min(len(normalized_manifest), max(1, len(normalized_manifest) // 3)))
         for idx in range(target_count):
             manifest_clip = normalized_manifest[round(idx * (len(normalized_manifest) - 1) / max(1, target_count - 1))]
-            add_window(
-                manifest_clip["start"],
-                min(manifest_clip["end"], manifest_clip["start"] + window_seconds),
-                source="sentinel_coverage",
-                manifest_clip_id=manifest_clip["clip_id"],
-            )
+            add_sliding_windows(manifest_clip["start"], manifest_clip["end"], source="sentinel_coverage", manifest_clip_id=manifest_clip["clip_id"])
 
     windows = sorted(windows, key=lambda item: (item["start"], item["end"], item["source"], item.get("manifest_clip_id") or "", item.get("chunk_index") if item.get("chunk_index") is not None else -1))
     if max_windows > 0:
         windows = windows[:max_windows]
     return windows
-
 
 def select_gemma_frames_for_window(window: dict, frames_dir: str, frames_per_window: int = 2) -> list[str]:
     start, end = _coerce_window_bounds(window if isinstance(window, dict) else {})
@@ -836,9 +831,9 @@ def select_gemma_frames_for_window(window: dict, frames_dir: str, frames_per_win
     return _pick_nearest_frames(targets, available, frames_per_window)
 
 
-def build_gemma_audio_extract_command(vod_mp4: str, window: dict, output_wav: str) -> list[str]:
+def build_gemma_audio_extract_command(vod_mp4: str, window: dict, output_wav: str, max_seconds: int = 30) -> list[str]:
     start, end = _coerce_window_bounds(window if isinstance(window, dict) else {})
-    duration = min(max(1, end - start), 30)
+    duration = min(max(1, end - start), max(1, _as_int(max_seconds, 30)))
     return [
         "ffmpeg",
         "-nostats",
