@@ -25,15 +25,15 @@ def ensure_gemma_api_ready(
     gemma_bin: str = "",
     model_path: str = "",
     mmproj_path: str = "",
+    draft_model_path: str = "",
     timeout: int = 600,
     check_interval: int = 5,
     logger=print,
 ) -> bool:
     """Start Gemma server and wait for it to be reachable.
 
-    Starts ``llama-server`` with the Gemma QAT model, no MTP draft
-    (known multimodal bug with draft model), and flags that leave
-    maximum VRAM headroom for Bee after Gemma finishes.
+    Starts ``llama-server`` with the Gemma QAT model and, when the
+    draft model is present, enables Gemma MTP speculative decoding.
 
     Returns ``True`` if Gemma becomes reachable within *timeout*.
     """
@@ -56,9 +56,11 @@ def ensure_gemma_api_ready(
         model_path = "/home/john/models/gemma-4-12b/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"
     if not mmproj_path:
         mmproj_path = "/home/john/models/gemma-4-12b/mmproj-F16.gguf"
+    if not draft_model_path:
+        candidate_draft = "/home/john/models/gemma-4-12b/gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf"
+        if os.path.isfile(candidate_draft):
+            draft_model_path = candidate_draft
 
-    # MTP draft model (gemma4-assistant arch) only works in llama.cpp-mtp fork
-    # which was cleaned up. Upstream builds don't support this arch.
     is_new_build = "build/bin/llama-server" in str(gemma_bin)
 
     cmd = [
@@ -74,7 +76,21 @@ def ensure_gemma_api_ready(
         "--reasoning", "on",
         "--no-host",
     ]
-    logger(f"Using {'new build' if is_new_build else 'build_compat'} at {gemma_bin}")
+    if draft_model_path:
+        cmd.extend([
+            "--model-draft", draft_model_path,
+            "--spec-type", "draft-mtp",
+            "--spec-draft-n-max", "4",
+            "-np", "1",
+            "--kv-unified",
+            "-b", "2048",
+            "-ub", "512",
+            "--jinja",
+        ])
+    logger(
+        f"Using {'new build' if is_new_build else 'build_compat'} at {gemma_bin}"
+        + (f" with MTP draft {draft_model_path}" if draft_model_path else " without MTP draft")
+    )
 
     # Check if already running
     endpoint = f"{base_url.rstrip('/')}/v1/models"
@@ -90,7 +106,7 @@ def ensure_gemma_api_ready(
     log_path = "/home/john/gemma_mtp_server.log"
     log_fd = open(log_path, "w")
     gemma_env = os.environ.copy()
-    if "LD_LIBRARY_PATH" not in gemma_env.get("LD_LIBRARY_PATH", ""):
+    if cuda_lib not in gemma_env.get("LD_LIBRARY_PATH", ""):
         cuda_lib = "/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib"
         existing = gemma_env.get("LD_LIBRARY_PATH", "")
         gemma_env["LD_LIBRARY_PATH"] = f"{cuda_lib}:{existing}" if existing else cuda_lib

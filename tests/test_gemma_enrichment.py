@@ -1,11 +1,13 @@
+import json
 from pathlib import Path
 
-import json
+import requests
 
 from src.synthesis.gemma_enrichment import (
     build_gemma_chat_payload,
     build_gemma_enrichment_prompt,
     call_gemma_llamacpp,
+    ensure_gemma_api_ready,
 )
 
 
@@ -41,3 +43,105 @@ def test_call_parser_handles_json_content(monkeypatch):
     out = call_gemma_llamacpp(base_url="http://example/v1", payload={"model": "m", "messages": []}, timeout=1)
     assert out["parse_ok"] is True
     assert out["parsed"]["ok"] is True
+
+
+def test_ensure_gemma_api_ready_uses_mtp_draft_flags_when_draft_model_present(monkeypatch, tmp_path):
+    log_path = tmp_path / "gemma.log"
+    captured = {}
+
+    class FakeProc:
+        def kill(self):
+            captured["killed"] = True
+
+    calls = {"count": 0}
+
+    def fake_get(url, timeout):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise requests.ConnectionError("not ready")
+
+        class Resp:
+            status_code = 200
+
+        return Resp()
+
+    def fake_popen(cmd, stdout=None, stderr=None, env=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        return FakeProc()
+
+    monkeypatch.setattr("src.synthesis.gemma_enrichment.requests.get", fake_get)
+    monkeypatch.setattr("src.synthesis.gemma_enrichment.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("src.synthesis.gemma_enrichment.time.sleep", lambda *_: None)
+    monkeypatch.setattr("src.synthesis.gemma_enrichment.open", lambda *a, **k: log_path.open("w"), raising=False)
+
+    ready = ensure_gemma_api_ready(
+        base_url="http://localhost:8084",
+        gemma_bin="/fake/llama-server",
+        model_path="/fake/main.gguf",
+        mmproj_path="/fake/mmproj.gguf",
+        draft_model_path="/fake/draft.gguf",
+        timeout=5,
+        check_interval=0,
+        logger=lambda *_: None,
+    )
+
+    assert ready is True
+    cmd = captured["cmd"]
+    assert "--model-draft" in cmd
+    assert "/fake/draft.gguf" in cmd
+    assert "--spec-type" in cmd
+    assert "draft-mtp" in cmd
+    assert "--spec-draft-n-max" in cmd
+    assert "4" in cmd
+    assert "-np" in cmd
+    assert "1" in cmd
+    assert "--kv-unified" in cmd
+    assert "--jinja" in cmd
+
+
+def test_ensure_gemma_api_ready_does_not_duplicate_cuda_lib_in_ld_library_path(monkeypatch, tmp_path):
+    log_path = tmp_path / "gemma.log"
+    captured = {}
+    cuda_lib = "/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib"
+
+    class FakeProc:
+        def kill(self):
+            captured["killed"] = True
+
+    calls = {"count": 0}
+
+    def fake_get(url, timeout):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise requests.ConnectionError("not ready")
+
+        class Resp:
+            status_code = 200
+
+        return Resp()
+
+    def fake_popen(cmd, stdout=None, stderr=None, env=None):
+        captured["env"] = env
+        return FakeProc()
+
+    monkeypatch.setattr("src.synthesis.gemma_enrichment.requests.get", fake_get)
+    monkeypatch.setattr("src.synthesis.gemma_enrichment.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("src.synthesis.gemma_enrichment.time.sleep", lambda *_: None)
+    monkeypatch.setattr("src.synthesis.gemma_enrichment.open", lambda *a, **k: log_path.open("w"), raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/existing")
+
+    ready = ensure_gemma_api_ready(
+        base_url="http://localhost:8084",
+        gemma_bin="/fake/llama-server",
+        model_path="/fake/main.gguf",
+        mmproj_path="/fake/mmproj.gguf",
+        draft_model_path="/fake/draft.gguf",
+        timeout=5,
+        check_interval=0,
+        logger=lambda *_: None,
+    )
+
+    assert ready is True
+    ld_library_path = captured["env"]["LD_LIBRARY_PATH"]
+    assert ld_library_path.count(cuda_lib) == 1
