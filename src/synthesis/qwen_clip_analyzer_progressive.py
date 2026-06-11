@@ -45,7 +45,10 @@ from src.intelligence.streamer_store import (
     save_streamer_profile,
 )
 from src.synthesis.audio_normalization import normalize_audio_result
-from src.synthesis.bee_server import ensure_bee_api_ready
+from src.synthesis.bee_server import (
+    ensure_bee_api_ready,
+    shutdown_bee,
+)
 from src.synthesis.clip_context import build_clip_context, render_prompt_context
 from src.synthesis.scoring import normalize_clip_analysis
 from src.synthesis.stage1_discovery import (
@@ -2237,6 +2240,37 @@ def run():
             log(f"Updated results saved with profile-update metadata: {OUTPUT_PATH}")
         except Exception as e:
             log(f"WARN: persistent profile update flow failed: {e}")
+    # ── Verification: ensure output artifacts are valid ──
+    _verify_pipeline_output(OUTPUT_PATH, VOD_ID, log)
+
+    # ── Shutdown auto-started backends ──
+    if START_BEE:
+        shutdown_bee(base_url=BEE_URL, logger=lambda message: log(f"  {message}"))
+
+
+def _verify_pipeline_output(output_path: Path, vod_id: str, logger=print) -> None:
+    """Verify the pipeline output artifact exists and contains valid clips.
+
+    Exits with code 3 if the file is missing, empty, or has no selected clips.
+    """
+    if not output_path.exists():
+        logger(f"ERROR: Output file not found: {output_path}")
+        sys.exit(3)
+
+    with open(output_path) as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as e:
+            logger(f"ERROR: Output file is corrupt JSON: {e}")
+            sys.exit(3)
+
+    selected = (data.get("final_ranking", {}) or {}).get("final_selected_clips", [])
+    if not selected:
+        logger(f"ERROR: No clips in final_selected_clips for VOD {vod_id}. Pipeline produced no usable output.")
+        sys.exit(3)
+
+    logger(f"Verification OK: {len(selected)} clip(s) in final output.")
+    logger(f"Output: {output_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

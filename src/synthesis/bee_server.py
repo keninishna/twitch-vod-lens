@@ -132,3 +132,28 @@ def ensure_bee_api_ready(
         started=True,
         message=build_bee_failure_guidance(base_url, start_command=start_command),
     )
+
+
+def shutdown_bee(
+    base_url: str = "http://localhost:8082",
+    logger=print,
+) -> None:
+    """Shut down the Bee server to free VRAM.
+
+    Tries graceful API shutdown first, then ``fuser -k`` on port 8082.
+    """
+    try:
+        req = Request(f"{base_url.rstrip('/')}/shutdown", method="POST")
+        from urllib.request import urlopen
+        resp = urlopen(req, timeout=5)
+        logger("Bee shutdown via API succeeded.")
+        return
+    except Exception:
+        pass
+
+    try:
+        subprocess.run(["fuser", "-k", "-n", "tcp", "8082"], timeout=10)
+        logger("Bee killed via fuser -k on port 8082.")
+        time.sleep(2)
+    except Exception:
+        logger("WARN: could not kill Bee process (may already be dead).")
