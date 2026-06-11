@@ -43,15 +43,16 @@ Post+ Optional profile update proposal/auto-merge (mode-gated)
 Post++ Optional artifact cleanup (intermediate or post-extraction)
 ```
 
-**Fast-pass status (June 07):** Validated end-to-end on real VOD `2788478641` (197 clips, ~6.5 hr VOD). Gemma enrichment processed 262 windows, ~90 min total (Gemma + Qwen synthesis). Gemma 4 MTP support (PR #23398) was merged into upstream `llama.cpp` master on June 07, 2026. Multimodal MTP (images + draft model) works correctly — the draft-context sequence position bug is resolved. Gemma MTP achieves **~313 T/s predicted** on RTX 5090 with 77% draft acceptance. Raw text observations + deterministic Python parser (`parse_gemma_raw_output`) eliminates all parse failures. Concurrency (`GEMMA_CONCURRENT_WORKERS=3`) reduces Gemma enrichment wall time ~3×.
+**Fast-pass status (June 11):** Validated on VOD `2792837521` (129 clips, ~4.2 hr VOD). Gemma enrichment processed **172 windows, 162 successful in 21.6 min** at ~148 tok/s generation with 32K context. No MTP draft — the upstream `llama.cpp` build lacks the `gemma4-assistant` architecture from the `llama.cpp-mtp` fork (deleted during cleanup). Raw text observations + deterministic Python parser (`parse_gemma_raw_output`) eliminates all parse failures. Concurrency: single-worker (GEMMA_CONCURRENT_WORKERS=1) due to `-np auto = 4`, but serializes one window at a time to avoid context collisions.
 
 **Runtime stack (sequential loading):**
-- **Gemma 4 12B** → `build_compat` `llama-server` on port **8084** using **Unsloth QAT GGUF** (`gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` + `mmproj-F16.gguf`). No MTP draft model — multimodal + draft is a known bug. Context 4096, no-mmap, flash-attn.
+- **Gemma 4 12B** → upstream `llama.cpp` build on port **8084** using **Unsloth QAT GGUF** (`gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` + `mmproj-F16.gguf`). Context **32768** (required to fit images + audio + text in KV cache). No MTP draft — upstream lacks `gemma4-assistant` architecture. New build at `/home/john/llama.cpp/build/bin/llama-server`; fallback `build_compat` at `/home/john/llama.cpp/build_compat/bin/llama-server`.
 - **Qwen 3.6 27B DFlash** → BeeLlama v0.3.1 prebuilt CUDA 13.1 on port **8082** (GPU mmproj, `--reasoning on`, `--ctx-size 102400`).
 - Both backends **never run simultaneously**. Pipeline loads them sequentially:
-  1. Fast-pass path: Gemma loaded first → enrichment → Gemma killed → Bee loaded → Qwen vision
+  1. Fast-pass path: Gemma loaded first → enrichment → `shutdown_gemma()` → Bee loaded → Qwen vision
   2. Standard path: only Bee loaded (Gemma not needed)
-- Managed by `ensure_gemma_api_ready()` / `shutdown_gemma()` in `gemma_enrichment.py` and `ensure_bee_api_ready()` in `bee_server.py`.
+- After pipeline completes: auto-`shutdown_bee()` when `--start-bee` was used. Output verification via `_verify_pipeline_output()` checks for valid JSON and >=1 clip in `final_selected_clips` (exits code 3 on failure).
+- Managed by `ensure_gemma_api_ready()` / `shutdown_gemma()` in `gemma_enrichment.py` and `ensure_bee_api_ready()` / `shutdown_bee()` in `bee_server.py`.
 - Both require `LD_LIBRARY_PATH` to include `/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib` for CUDA backend discovery. The `start_bee_prebuilt_wsl.sh` script handles this; `ensure_gemma_api_ready()` passes it via explicit `env` param.
 
 ---
@@ -169,7 +170,7 @@ Persistent intelligence:
 - `src/synthesis/clip_context.py`
 - `src/synthesis/gemma_enrichment.py` (Gemma multimodal enrichment, raw text → deterministic parser via `parse_gemma_raw_output()`, concurrent workers)
 - `src/synthesis/fastpass_triage.py`
-- `src/synthesis/bee_server.py`
+- `src/synthesis/bee_server.py` (Bee lifecycle: `ensure_bee_api_ready`, `shutdown_bee`)
 - `src/synthesis/schemas/clip_intelligence_stages.py`
 - `src/synthesis/extract_and_upload_clips.py`
 
@@ -250,16 +251,17 @@ Backends are loaded **sequentially** to avoid VRAM contention. The pipeline mana
 export LD_LIBRARY_PATH="/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib:${LD_LIBRARY_PATH:-}"
 ```
 
-**Gemma server (fast-pass enrichment only, no MTP draft):**
+**Gemma server (fast-pass enrichment only, no MTP draft, 32K context):**
 ```bash
-# Launch in tmux (keep alive on WSL):
-tmux new-session -d -s gemma "cd /home/john && \\
-  LD_LIBRARY_PATH=/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib \\
-  /home/john/llama.cpp/build_compat/bin/llama-server \\
-  --host 0.0.0.0 --port 8084 \\
-  --model /home/john/models/gemma-4-12b/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \\
-  --mmproj /home/john/models/gemma-4-12b/mmproj-F16.gguf \\
-  -c 4096 -ngl 999 --no-mmap --flash-attn on --reasoning on --no-host \\
+# The pipeline auto-starts Gemma via ensure_gemma_api_ready() with --fast-pass.
+# Manual launch for testing:
+tmux new-session -d -s gemma "cd /home/john && \
+  LD_LIBRARY_PATH=/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib \
+  /home/john/llama.cpp/build/bin/llama-server \
+  --host 0.0.0.0 --port 8084 \
+  --model /home/john/models/gemma-4-12b/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
+  --mmproj /home/john/models/gemma-4-12b/mmproj-F16.gguf \
+  -c 32768 -ngl 999 --no-mmap --flash-attn on --reasoning on --no-host \
   > /home/john/gemma_mtp_server.log 2>&1"
 
 # Or let the pipeline auto-start via ensure_gemma_api_ready() with --fast-pass.
@@ -286,12 +288,16 @@ PYTHONPATH=. python3 src/synthesis/qwen_clip_analyzer_progressive.py \
   --fast-pass-mode gemma-enriched \
   --fast-pass-dry-run
 
-# Managed Bee startup (optional — use when Bee is not already running)
-PYTHONPATH=. python3 src/synthesis/qwen_clip_analyzer_progressive.py \
-  --vod-id <VOD_ID> \
-  --bee-url http://localhost:8082 \
-  --start-bee \
+# Managed Bee startup (probes for 10s before starting — was 300s)
+PYTHONPATH=. python3 src/synthesis/qwen_clip_analyzer_progressive.py \\
+  --vod-id <VOD_ID> \\
+  --bee-url http://localhost:8082 \\
+  --start-bee \\
   --bee-start-command "bash /home/john/twitch-vod-analyzer/scripts/start_bee_prebuilt_wsl.sh"
+
+# After pipeline completes: backends auto-shutdown if started via --start-bee.
+# Output is verified — exits with code 3 if qwen_vision_progressive.json is
+# missing, corrupt, or contains zero final_selected_clips.
 ```
 
 ### 8.8 Comparison harness (fast-pass vs baseline)
@@ -414,11 +420,16 @@ Optional artifacts:
 Per final clip expected fields:
 - `score`/`final_score`
 - `suggested_trim_start` / `suggested_trim_end`
+- **`suggested_trim_start_hms`** / **`suggested_trim_end_hms`** — HH:MM:SS format
+- **`start_hms`** / **`end_hms`** — HH:MM:SS format
+- **`vod_url`** — direct link to VOD at clip window start (e.g. `https://www.twitch.tv/videos/<VOD_ID>?t=1h44m31s`)
 - `clip_point`
 - `platform_scores`
 - `platform_recommendations`
 - `intelligence_report`
 - optional `speaker_attribution` payload
+
+**Pipeline verification:** After the final save, `_verify_pipeline_output()` checks that the output file exists, is valid JSON, and has ≥1 clip in `final_selected_clips`. Exits with code 3 on failure.
 
 ---
 
@@ -478,12 +489,15 @@ python3 --version
 - Bee not running/unhealthy: synthesis preflight fails; check Bee server logs at `/home/john/bee_prebuilt_v031.log`.
 - Gemma not running/unhealthy: fast-pass Gemma enrichment errors; check Gemma server logs (`/home/john/gemma_mtp_server.log`) and verify `tmux ls | grep gemma`.
 - GPU memory pressure: check `nvidia-smi`. Backends load sequentially — only one is in VRAM at a time. Gemma (~11 GiB) loads first for enrichment, then is killed before Bee (~20 GiB) starts. Never both simultaneously. If Bee fails to start after Gemma, check that `shutdown_gemma()` freed VRAM and the CUDA library path (`LD_LIBRARY_PATH`) includes `/home/john/.local/lib/python3.12/site-packages/nvidia/cu13/lib`.
+- **Gemma enrichment returns 500 / context exceeded errors:** Gemma server was started with insufficient `-c` context size. Enrichment requests include images + audio + text which can exceed 4096 tokens. Ensure `ensure_gemma_api_ready()` uses `-c 32768`.
+- **Pipeline exits with code 3:** `_verify_pipeline_output()` failed. The output file is missing, corrupt JSON, or `final_selected_clips` is empty. Check the pipeline log for specific error messages.
 
 ---
 
 ## 11) Notes
 
 - **Twitch clip API is unreliable.** `POST /helix/videos/clips` has ~30% failure rate on VOD clipping (early offsets under ~10min and random dead zones throughout). Known Twitch-side issue since 2019. Not suitable for pipeline automation. Clip creation is manual/one-off. See Section 8.10 for the +30s workaround if needed.
+- **MTP draft model unavailable.** The `gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf` (architecture `gemma4-assistant`) only works with the `llama.cpp-mtp` fork. The fork was deleted during cleanup. Upstream `llama.cpp` does not support this architecture. Gemma runs without draft at ~148 tok/s generation.
 
 ---
 
@@ -495,4 +509,3 @@ python3 --version
 - `scripts/start_bee_prebuilt_wsl.sh` (Bee launch helper for current working config)
 - `~/.hermes/skills/mlops/clip-intelligence-pipeline/SKILL.md`
 - [llama.cpp PR #23398](https://github.com/ggml-org/llama.cpp/pull/23398) — Gemma 4 MTP (merged June 07, 2026)
-- [Janvitos MTP draft model](https://huggingface.co/Janvitos/gemma-4-12B-it-qat-assistant-MTP-Q8_0-GGUF)
