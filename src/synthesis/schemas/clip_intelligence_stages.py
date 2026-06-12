@@ -204,6 +204,7 @@ class FinalSelectedClip(StrictModel):
     score: float = Field(ge=0, le=10)
     raw_score: float = Field(ge=0, le=10)
     normalized_score: float = Field(ge=0, le=10)
+    title: str
     clip_point: str
     narrative_type: str
     platform_scores: Dict[str, float]

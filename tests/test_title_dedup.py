@@ -372,3 +372,65 @@ def test_finalize_stage3_candidates_preserves_speaker_attribution_fields_in_outp
     assert sa["primary_speaker_identity"] == "guest"
     assert sa["primary_speaker_name"] == "SkitchFriend"
     assert sa["off_streamer_voice_detected"] is True
+
+
+def test_finalize_stage3_candidates_exposes_title_field():
+    scored_candidates = [
+        {
+            "candidate_id": "clip-1",
+            "start": 10.0,
+            "end": 70.0,
+            "final_score": 7.0,
+            "raw_score": 7.0,
+            "eligible_for_final": True,
+            "penalty_trace": [],
+            "hard_gates": [],
+            "rejection_reasons": [],
+            "trim_source": "qwen",
+            "clamped_trim_start": 15.0,
+            "clamped_trim_end": 45.0,
+        }
+    ]
+    stitched_candidates = [
+        {
+            "stitched_id": "clip-1",
+            "start": 10.0,
+            "end": 70.0,
+            "narrative_type": "organic_reaction",
+            "trigger": "zombie says something absurd",
+            "payoff": "streamer repeats it in disbelief",
+            "evidence_lines": ["clear trigger/payoff"],
+            "confidence": 0.9,
+            "source_candidate_ids": ["c1"],
+            "source_windows": [[10.0, 70.0]],
+            "merge_reasons": ["same story"],
+        }
+    ]
+    analysis_by_candidate = {
+        "clip-1": {
+            "clip_point": "Zombie Calls Her a Piece of Kimchi",
+            "suggested_trim_start": 15.0,
+            "suggested_trim_end": 45.0,
+            "platform_scores": {"tiktok": 9},
+            "platform_recommendations": ["tiktok"],
+            "speaker_attribution": {
+                "primary_speaker_identity": "streamer",
+                "primary_speaker_name": None,
+                "streamer_speaking_ratio": 1.0,
+                "streamer_speaking_confidence": 1.0,
+                "off_streamer_voice_detected": False,
+                "evidence": [],
+            },
+        }
+    }
+
+    out = finalize_stage3_candidates(
+        scored_candidates=scored_candidates,
+        stitched_candidates=stitched_candidates,
+        analysis_by_candidate=analysis_by_candidate,
+        min_score=3.0,
+        max_clips=20,
+    )
+
+    assert out[0]["title"] == "Zombie Calls Her a Piece of Kimchi"
+    assert out[0]["clip_point"] == "Zombie Calls Her a Piece of Kimchi"

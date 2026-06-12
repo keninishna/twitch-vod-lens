@@ -256,6 +256,18 @@ def _parse_json_response(text: str | None) -> tuple[bool, Any | None, str | None
         return False, None, str(exc)
 
 
+def _extract_float(raw: str, pattern: str, *, default: float = 0.0) -> float:
+    import re
+
+    match = re.search(pattern, raw, re.IGNORECASE)
+    if not match:
+        return float(default)
+    try:
+        return float(match.group(1))
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def parse_gemma_raw_output(text: str | None) -> dict:
     """Parse Gemma's raw natural-language observations into structured annotation dict."""
     result = {
@@ -313,14 +325,16 @@ def parse_gemma_raw_output(text: str | None) -> dict:
     speaker_match = re.search(r"SPEAKER:\s*(.*?)(?=\n\nEMOTION:|\n\nRISK_FLAGS:|$)", text, re.DOTALL)
     if speaker_match:
         raw = speaker_match.group(1).strip()
-        # Extract streamer_led_likelihood
-        sll = re.search(r"streamer.*?led.*?([\d\.]+)", raw, re.IGNORECASE)
-        if sll:
-            result["speaker_nuance"]["streamer_led_likelihood"] = float(sll.group(1))
-        # Extract transactional_alert_likelihood
-        tal = re.search(r"transactional.*?([\d\.]+)", raw, re.IGNORECASE)
-        if tal:
-            result["emotion_nuance"]["transactional_alert_likelihood"] = float(tal.group(1))
+        result["speaker_nuance"]["streamer_led_likelihood"] = _extract_float(
+            raw,
+            r"streamer.*?led.*?(\d+(?:\.\d+)?)",
+            default=result["speaker_nuance"]["streamer_led_likelihood"],
+        )
+        result["emotion_nuance"]["transactional_alert_likelihood"] = _extract_float(
+            raw,
+            r"transactional.*?(\d+(?:\.\d+)?)",
+            default=result["emotion_nuance"]["transactional_alert_likelihood"],
+        )
         if re.search(r"non_streamer|chat_tts|game_character", raw, re.IGNORECASE):
             result["speaker_nuance"]["non_streamer_voice_present"] = True
         for kw in ["streamer", "non_streamer", "mixed", "unknown"]:
@@ -365,6 +379,13 @@ def call_gemma_llamacpp(*, base_url: str, payload: dict, timeout: int) -> dict:
     message = data.get("choices", [{}])[0].get("message", {})
     raw = message.get("content")
     parse_ok, parsed, error = _parse_json_response(raw)
+    if not parse_ok:
+        try:
+            parsed = parse_gemma_raw_output(raw)
+            parse_ok = True
+            error = None
+        except Exception as exc:
+            error = str(exc)
     return {
         "http_status": response.status_code,
         "raw_content": raw,

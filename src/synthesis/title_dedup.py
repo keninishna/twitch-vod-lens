@@ -273,6 +273,7 @@ def finalize_stage3_candidates(
             "score": float(scored.get("final_score", 0.0)),
             "raw_score": float(scored.get("raw_score", 0.0)),
             "normalized_score": float(scored.get("final_score", 0.0)),
+            "title": title,
             "clip_point": title,
             "narrative_type": str(stitched.get("narrative_type") or "unknown"),
             "platform_scores": platform_scores,

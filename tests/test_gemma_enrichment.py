@@ -45,6 +45,29 @@ def test_call_parser_handles_json_content(monkeypatch):
     assert out["parsed"]["ok"] is True
 
 
+def test_call_parser_tolerates_trailing_dot_float_tokens(monkeypatch):
+    raw = """
+SPEAKER:
+Primary speaker identity: unknown. streamer led likelihood 0.0. transactional alert likelihood 0.1.
+
+EMOTION:
+Streamer affect: amused.
+""".strip()
+
+    class Resp:
+        status_code = 200
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return {"choices": [{"message": {"content": raw}}]}
+
+    monkeypatch.setattr("src.synthesis.gemma_enrichment.requests.post", lambda *a, **k: Resp())
+    out = call_gemma_llamacpp(base_url="http://example/v1", payload={"model": "m", "messages": []}, timeout=1)
+    assert out["parse_ok"] is True
+    assert out["parsed"]["speaker_nuance"]["streamer_led_likelihood"] == 0.0
+    assert out["parsed"]["emotion_nuance"]["transactional_alert_likelihood"] == 0.1
+
+
 def test_ensure_gemma_api_ready_uses_mtp_draft_flags_when_draft_model_present(monkeypatch, tmp_path):
     log_path = tmp_path / "gemma.log"
     captured = {}
