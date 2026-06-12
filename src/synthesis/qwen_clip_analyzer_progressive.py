@@ -134,7 +134,8 @@ GEMMA_MAX_WINDOWS = int(os.environ.get("GEMMA_MAX_WINDOWS", 0))
 GEMMA_FRAMES_PER_WINDOW = int(os.environ.get("GEMMA_FRAMES_PER_WINDOW", 2))
 GEMMA_AUDIO_MAX_SECONDS = int(os.environ.get("GEMMA_AUDIO_MAX_SECONDS", 30))
 GEMMA_RESPONSE_TIMEOUT_SECONDS = int(os.environ.get("GEMMA_RESPONSE_TIMEOUT_SECONDS", 180))
-GEMMA_CONCURRENT_WORKERS = int(os.environ.get("GEMMA_CONCURRENT_WORKERS", 3))
+GEMMA_PARALLEL_SLOTS = int(os.environ.get("GEMMA_PARALLEL_SLOTS", 30))
+GEMMA_CONCURRENT_WORKERS = int(os.environ.get("GEMMA_CONCURRENT_WORKERS", 8))
 FAST_PASS_CHUNK_SECONDS = int(os.environ.get("FAST_PASS_CHUNK_SECONDS", 600))
 FAST_PASS_OVERLAP_SECONDS = int(os.environ.get("FAST_PASS_OVERLAP_SECONDS", 60))
 FAST_PASS_MAX_TRIAGE_CANDIDATES = int(os.environ.get("FAST_PASS_MAX_TRIAGE_CANDIDATES", 60))
@@ -1297,6 +1298,7 @@ def run():
             # and shut it down after enrichment to free VRAM for Bee.
             gemma_ready = ensure_gemma_api_ready(
                 base_url=GEMMA_URL,
+                parallel_slots=GEMMA_PARALLEL_SLOTS,
                 timeout=600,
                 check_interval=5,
                 logger=lambda message: log(f"  {message}"),
@@ -2315,6 +2317,8 @@ if __name__ == "__main__":
     parser.add_argument("--gemma-frames-per-window", type=int, default=GEMMA_FRAMES_PER_WINDOW)
     parser.add_argument("--gemma-audio-max-seconds", type=int, default=GEMMA_AUDIO_MAX_SECONDS)
     parser.add_argument("--gemma-response-timeout-seconds", type=int, default=GEMMA_RESPONSE_TIMEOUT_SECONDS)
+    parser.add_argument("--gemma-parallel-slots", type=int, default=GEMMA_PARALLEL_SLOTS)
+    parser.add_argument("--gemma-concurrent-workers", type=int, default=GEMMA_CONCURRENT_WORKERS)
     parser.add_argument("--fast-pass-chunk-seconds", type=int, default=FAST_PASS_CHUNK_SECONDS)
     parser.add_argument("--fast-pass-overlap-seconds", type=int, default=FAST_PASS_OVERLAP_SECONDS)
     parser.add_argument("--fast-pass-max-triage-candidates", type=int, default=FAST_PASS_MAX_TRIAGE_CANDIDATES)
@@ -2368,6 +2372,8 @@ if __name__ == "__main__":
     GEMMA_FRAMES_PER_WINDOW = args.gemma_frames_per_window
     GEMMA_AUDIO_MAX_SECONDS = args.gemma_audio_max_seconds
     GEMMA_RESPONSE_TIMEOUT_SECONDS = args.gemma_response_timeout_seconds
+    GEMMA_PARALLEL_SLOTS = args.gemma_parallel_slots
+    GEMMA_CONCURRENT_WORKERS = args.gemma_concurrent_workers
     FAST_PASS_CHUNK_SECONDS = args.fast_pass_chunk_seconds
     FAST_PASS_OVERLAP_SECONDS = args.fast_pass_overlap_seconds
     FAST_PASS_MAX_TRIAGE_CANDIDATES = args.fast_pass_max_triage_candidates

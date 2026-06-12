@@ -104,6 +104,7 @@ def test_ensure_gemma_api_ready_uses_mtp_draft_flags_when_draft_model_present(mo
         model_path="/fake/main.gguf",
         mmproj_path="/fake/mmproj.gguf",
         draft_model_path="/fake/draft.gguf",
+        parallel_slots=30,
         timeout=5,
         check_interval=0,
         logger=lambda *_: None,
@@ -118,7 +119,8 @@ def test_ensure_gemma_api_ready_uses_mtp_draft_flags_when_draft_model_present(mo
     assert "--spec-draft-n-max" in cmd
     assert "4" in cmd
     assert "-np" in cmd
-    assert "1" in cmd
+    np_index = cmd.index("-np")
+    assert cmd[np_index + 1] == "30"
     assert "--kv-unified" in cmd
     assert "--jinja" in cmd
 

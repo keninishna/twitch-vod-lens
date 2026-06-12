@@ -26,6 +26,7 @@ def ensure_gemma_api_ready(
     model_path: str = "",
     mmproj_path: str = "",
     draft_model_path: str = "",
+    parallel_slots: int = 30,
     timeout: int = 600,
     check_interval: int = 5,
     logger=print,
@@ -75,17 +76,17 @@ def ensure_gemma_api_ready(
         "--flash-attn", "on",
         "--reasoning", "on",
         "--no-host",
+        "-np", str(max(1, int(parallel_slots))),
+        "--kv-unified",
+        "-b", "2048",
+        "-ub", "512",
+        "--jinja",
     ]
     if draft_model_path:
         cmd.extend([
             "--model-draft", draft_model_path,
             "--spec-type", "draft-mtp",
             "--spec-draft-n-max", "4",
-            "-np", "1",
-            "--kv-unified",
-            "-b", "2048",
-            "-ub", "512",
-            "--jinja",
         ])
     logger(
         f"Using {'new build' if is_new_build else 'build_compat'} at {gemma_bin}"
