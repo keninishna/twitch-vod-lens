@@ -153,7 +153,7 @@ def _extract_quoted_phrase(*texts: str) -> str:
     for raw in texts:
         if not raw:
             continue
-        match = re.search(r"['\"“”]([^'\"“”]{4,90})['\"“”]", str(raw))
+        match = re.search(r"(?<![A-Za-z0-9])['\"“”]([^'\"“”]{4,90})['\"“”](?![A-Za-z0-9])", str(raw))
         if match:
             phrase = re.sub(r"\s+", " ", match.group(1)).strip(" ' \".,;:-")
             if phrase:
@@ -180,6 +180,17 @@ def _rewrite_non_streamer_title(title: str, stitched: Dict, analysis: Dict) -> s
     low_trigger = trigger.lower()
     low_payoff = payoff.lower()
 
+    if "helicopter" in low_trigger and any(k in low_payoff for k in ("blame", "weight", "fat")):
+        return "The Helicopter Starts Spinning and the Blame Game Begins"
+
+    if "error code" in low_trigger or "error codes" in low_trigger:
+        if any(k in low_payoff for k in ("injur", "scratch", "hurt")):
+            return "Error Codes Mid-Fight Turn Into an Injury Bit"
+        return "Error Codes Pop Up at the Worst Possible Time"
+
+    if "removed from the area" in low_trigger:
+        return '"You\'ve Been Removed from the Area" Kicks Off an Injury Bit'
+
     quoted = _extract_quoted_phrase(title, trigger, payoff)
     if quoted:
         if any(k in low_payoff for k in ("disbelief", "confus", "repeat", "double take")):
@@ -191,17 +202,6 @@ def _rewrite_non_streamer_title(title: str, stitched: Dict, analysis: Dict) -> s
         if any(k in low_payoff for k in ("laugh", "lose it", "break")):
             return f'"{quoted}" Makes Her Lose It'
         return f'"{quoted}" Stops Her Cold'
-
-    if "helicopter" in low_trigger and any(k in low_payoff for k in ("blame", "weight", "fat")):
-        return "The Helicopter Starts Spinning and the Blame Game Begins"
-
-    if "error code" in low_trigger or "error codes" in low_trigger:
-        if any(k in low_payoff for k in ("injur", "scratch", "hurt")):
-            return "Error Codes Mid-Fight Turn Into an Injury Bit"
-        return "Error Codes Pop Up at the Worst Possible Time"
-
-    if "removed from the area" in low_trigger:
-        return '"You\'ve Been Removed from the Area" Kicks Off an Injury Bit'
 
     trigger_hook = _compact_hook_fragment(trigger)
     payoff_hook = _compact_hook_fragment(payoff)

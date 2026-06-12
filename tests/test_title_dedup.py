@@ -558,3 +558,65 @@ def test_finalize_stage3_candidates_rewrites_generic_what_happens_title_to_quote
 
     assert out[0]["title"] == '"you look like a piece of kimchi" Makes Her Do a Double Take'
     assert out[0]["clip_point"] == '"you look like a piece of kimchi" Makes Her Do a Double Take'
+
+
+def test_finalize_stage3_candidates_rewrites_helicopter_blame_title_without_broken_apostrophe_quote():
+    scored_candidates = [
+        {
+            "candidate_id": "clip-heli-1",
+            "start": 13560.0,
+            "end": 13680.0,
+            "final_score": 6.0,
+            "raw_score": 6.0,
+            "eligible_for_final": True,
+            "penalty_trace": [],
+            "hard_gates": [],
+            "rejection_reasons": [],
+            "trim_source": "qwen",
+            "clamped_trim_start": 13566.0,
+            "clamped_trim_end": 13592.0,
+        }
+    ]
+    stitched_candidates = [
+        {
+            "stitched_id": "clip-heli-1",
+            "start": 13560.0,
+            "end": 13680.0,
+            "narrative_type": "organic_reaction",
+            "trigger": "Streamer tries to take off in helicopter but it spins out",
+            "payoff": "Streamer blames teammate's weight ('fat butt') for the physics glitch",
+            "evidence_lines": ["helicopter spins immediately", "blame lands right after"],
+            "confidence": 0.8,
+            "source_candidate_ids": ["c3"],
+            "source_windows": [[13560.0, 13680.0]],
+            "merge_reasons": ["same story"],
+        }
+    ]
+    analysis_by_candidate = {
+        "clip-heli-1": {
+            "clip_point": "What happens when streamer tries to take off in helicopter but it spin leads to streamer blames teammate's weight ('fat bu?",
+            "suggested_trim_start": 13566.0,
+            "suggested_trim_end": 13592.0,
+            "platform_scores": {},
+            "platform_recommendations": [],
+            "speaker_attribution": {
+                "primary_speaker_identity": "unknown",
+                "primary_speaker_name": None,
+                "streamer_speaking_ratio": 0.0,
+                "streamer_speaking_confidence": 0.0,
+                "off_streamer_voice_detected": False,
+                "evidence": [],
+            },
+        }
+    }
+
+    out = finalize_stage3_candidates(
+        scored_candidates=scored_candidates,
+        stitched_candidates=stitched_candidates,
+        analysis_by_candidate=analysis_by_candidate,
+        min_score=3.0,
+        max_clips=20,
+    )
+
+    assert out[0]["title"] == "The Helicopter Starts Spinning and the Blame Game Begins"
+    assert out[0]["clip_point"] == "The Helicopter Starts Spinning and the Blame Game Begins"
