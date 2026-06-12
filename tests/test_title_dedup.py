@@ -434,3 +434,127 @@ def test_finalize_stage3_candidates_exposes_title_field():
 
     assert out[0]["title"] == "Zombie Calls Her a Piece of Kimchi"
     assert out[0]["clip_point"] == "Zombie Calls Her a Piece of Kimchi"
+
+
+def test_finalize_stage3_candidates_preserves_strong_title_even_when_guest_voice_dominates():
+    scored_candidates = [
+        {
+            "candidate_id": "clip-guest-1",
+            "start": 100.0,
+            "end": 170.0,
+            "final_score": 8.4,
+            "raw_score": 8.4,
+            "eligible_for_final": True,
+            "penalty_trace": [],
+            "hard_gates": [],
+            "rejection_reasons": [],
+            "trim_source": "qwen",
+            "clamped_trim_start": 110.0,
+            "clamped_trim_end": 145.0,
+        }
+    ]
+    stitched_candidates = [
+        {
+            "stitched_id": "clip-guest-1",
+            "start": 100.0,
+            "end": 170.0,
+            "narrative_type": "guest_banter",
+            "trigger": "zombie says 'you look like a piece of kimchi'",
+            "payoff": "streamer repeats it in disbelief",
+            "evidence_lines": ["quoted line lands immediately"],
+            "confidence": 0.91,
+            "source_candidate_ids": ["c1"],
+            "source_windows": [[100.0, 170.0]],
+            "merge_reasons": ["same story"],
+        }
+    ]
+    analysis_by_candidate = {
+        "clip-guest-1": {
+            "clip_point": "Zombie Calls Her a Piece of Kimchi",
+            "suggested_trim_start": 110.0,
+            "suggested_trim_end": 145.0,
+            "platform_scores": {"tiktok": 9},
+            "platform_recommendations": ["tiktok"],
+            "speaker_attribution": {
+                "primary_speaker_identity": "guest",
+                "primary_speaker_name": "Zombie NPC",
+                "streamer_speaking_ratio": 0.35,
+                "streamer_speaking_confidence": 0.8,
+                "off_streamer_voice_detected": True,
+                "evidence": ["NPC line dominates the first beat"],
+            },
+        }
+    }
+
+    out = finalize_stage3_candidates(
+        scored_candidates=scored_candidates,
+        stitched_candidates=stitched_candidates,
+        analysis_by_candidate=analysis_by_candidate,
+        min_score=3.0,
+        max_clips=20,
+    )
+
+    assert out[0]["title"] == "Zombie Calls Her a Piece of Kimchi"
+    assert out[0]["clip_point"] == "Zombie Calls Her a Piece of Kimchi"
+
+
+def test_finalize_stage3_candidates_rewrites_generic_what_happens_title_to_quoted_hook():
+    scored_candidates = [
+        {
+            "candidate_id": "clip-guest-2",
+            "start": 100.0,
+            "end": 170.0,
+            "final_score": 8.4,
+            "raw_score": 8.4,
+            "eligible_for_final": True,
+            "penalty_trace": [],
+            "hard_gates": [],
+            "rejection_reasons": [],
+            "trim_source": "qwen",
+            "clamped_trim_start": 110.0,
+            "clamped_trim_end": 145.0,
+        }
+    ]
+    stitched_candidates = [
+        {
+            "stitched_id": "clip-guest-2",
+            "start": 100.0,
+            "end": 170.0,
+            "narrative_type": "guest_banter",
+            "trigger": "zombie says 'you look like a piece of kimchi'",
+            "payoff": "streamer repeats it in disbelief",
+            "evidence_lines": ["quoted line lands immediately"],
+            "confidence": 0.91,
+            "source_candidate_ids": ["c2"],
+            "source_windows": [[100.0, 170.0]],
+            "merge_reasons": ["same story"],
+        }
+    ]
+    analysis_by_candidate = {
+        "clip-guest-2": {
+            "clip_point": "What happens when zombie says 'you look like a piece of kimchi' leads to streamer repeats it in disbelief?",
+            "suggested_trim_start": 110.0,
+            "suggested_trim_end": 145.0,
+            "platform_scores": {"tiktok": 9},
+            "platform_recommendations": ["tiktok"],
+            "speaker_attribution": {
+                "primary_speaker_identity": "guest",
+                "primary_speaker_name": "Zombie NPC",
+                "streamer_speaking_ratio": 0.35,
+                "streamer_speaking_confidence": 0.8,
+                "off_streamer_voice_detected": True,
+                "evidence": ["NPC line dominates the first beat"],
+            },
+        }
+    }
+
+    out = finalize_stage3_candidates(
+        scored_candidates=scored_candidates,
+        stitched_candidates=stitched_candidates,
+        analysis_by_candidate=analysis_by_candidate,
+        min_score=3.0,
+        max_clips=20,
+    )
+
+    assert out[0]["title"] == '"you look like a piece of kimchi" Makes Her Do a Double Take'
+    assert out[0]["clip_point"] == '"you look like a piece of kimchi" Makes Her Do a Double Take'

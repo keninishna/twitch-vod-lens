@@ -122,6 +122,95 @@ def _sanitize_chat_title(title: str, trigger: str, payoff: str) -> str:
     return title
 
 
+def _looks_dry_title(title: str) -> bool:
+    low = re.sub(r"\s+", " ", (title or "").strip().lower())
+    if not low:
+        return True
+
+    if low.startswith(("what happens when ", "the moment ")):
+        return True
+
+    if low.startswith(("streamer ", "the streamer ", "she ", "her ", "streamer's ")):
+        return True
+
+    dry_markers = (
+        " leads to ",
+        " reacts to ",
+        " reads ",
+        " answers ",
+        " explains ",
+        " tries to ",
+        " starts ",
+        " begins ",
+        " roleplays ",
+        " repeats ",
+        " confusion and repetition",
+    )
+    return any(marker in low for marker in dry_markers)
+
+
+def _extract_quoted_phrase(*texts: str) -> str:
+    for raw in texts:
+        if not raw:
+            continue
+        match = re.search(r"['\"“”]([^'\"“”]{4,90})['\"“”]", str(raw))
+        if match:
+            phrase = re.sub(r"\s+", " ", match.group(1)).strip(" ' \".,;:-")
+            if phrase:
+                return phrase
+    return ""
+
+
+def _compact_hook_fragment(text: str) -> str:
+    frag = str(text or "").strip()
+    frag = re.sub(r"^(the )?streamer\s+", "", frag, flags=re.IGNORECASE)
+    frag = re.sub(r"^(game|system) message\s+", "", frag, flags=re.IGNORECASE)
+    frag = re.sub(r"^zombie says\s+", "", frag, flags=re.IGNORECASE)
+    frag = re.sub(r"\s+", " ", frag).strip(" ' \".,;:-")
+    if not frag:
+        return ""
+    if frag[0].islower():
+        frag = frag[0].upper() + frag[1:]
+    return frag[:72]
+
+
+def _rewrite_non_streamer_title(title: str, stitched: Dict, analysis: Dict) -> str:
+    trigger = str(stitched.get("trigger") or "")
+    payoff = str(stitched.get("payoff") or "")
+    low_trigger = trigger.lower()
+    low_payoff = payoff.lower()
+
+    quoted = _extract_quoted_phrase(title, trigger, payoff)
+    if quoted:
+        if any(k in low_payoff for k in ("disbelief", "confus", "repeat", "double take")):
+            return f'"{quoted}" Makes Her Do a Double Take'
+        if any(k in low_payoff for k in ("injur", "hurt", "scratch")):
+            return f'"{quoted}" Kicks Off an Injury Bit'
+        if any(k in low_payoff for k in ("blame", "weight", "fat")):
+            return f'"{quoted}" Starts the Blame Game'
+        if any(k in low_payoff for k in ("laugh", "lose it", "break")):
+            return f'"{quoted}" Makes Her Lose It'
+        return f'"{quoted}" Stops Her Cold'
+
+    if "helicopter" in low_trigger and any(k in low_payoff for k in ("blame", "weight", "fat")):
+        return "The Helicopter Starts Spinning and the Blame Game Begins"
+
+    if "error code" in low_trigger or "error codes" in low_trigger:
+        if any(k in low_payoff for k in ("injur", "scratch", "hurt")):
+            return "Error Codes Mid-Fight Turn Into an Injury Bit"
+        return "Error Codes Pop Up at the Worst Possible Time"
+
+    if "removed from the area" in low_trigger:
+        return '"You\'ve Been Removed from the Area" Kicks Off an Injury Bit'
+
+    trigger_hook = _compact_hook_fragment(trigger)
+    payoff_hook = _compact_hook_fragment(payoff)
+    if trigger_hook and payoff_hook:
+        return f"{trigger_hook} — {payoff_hook}"
+
+    return title
+
+
 def _generate_title(stitched: Dict, analysis: Dict) -> str:
     narrative_type = str(stitched.get("narrative_type") or "moment")
     trigger = str(stitched.get("trigger") or "a key moment")
@@ -154,10 +243,8 @@ def _apply_speaker_title_guard(title: str, stitched: Dict, analysis: Dict) -> st
     if not low:
         return title
 
-    if "streamer" in low or "she " in low or "her " in low:
-        trigger = str(stitched.get("trigger") or "a key moment")
-        payoff = str(stitched.get("payoff") or "a payoff")
-        return f"What happens when {trigger[:52].lower()} leads to {payoff[:42].lower()}?"
+    if _looks_dry_title(title):
+        return _rewrite_non_streamer_title(title, stitched, analysis)
 
     return title
 
