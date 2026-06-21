@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from src.intelligence.game_knowledge_types import GameCategorySegment
 from src.preprocessing.types import VodMeta
 
 
@@ -129,6 +130,19 @@ def _parse_metadata(stdout: str, url: str) -> VodMeta:
             streamer="unknown",
         )
 
+    game_name = data.get("game") or data.get("game_name") or data.get("category")
+    game_id = data.get("game_id")
+    categories = []
+    for value in (data.get("categories") or []):
+        if isinstance(value, str) and value not in categories:
+            categories.append(value)
+    for value in [game_name, data.get("category")]:
+        if isinstance(value, str) and value not in categories:
+            categories.append(value)
+    category_segments = []
+    if game_name:
+        category_segments.append(GameCategorySegment(start=0.0, end=int(data.get("duration", 0)) or None, game_name=game_name, game_id=game_id, source="yt_dlp", confidence=1.0 if game_id else 0.7))
+
     return VodMeta(
         id=extract_vod_id(url),
         title=data.get("title", f"VOD_{extract_vod_id(url)}"),
@@ -138,6 +152,10 @@ def _parse_metadata(stdout: str, url: str) -> VodMeta:
         resolution=data.get("resolution"),
         fps=data.get("fps"),
         format=data.get("ext", "mp4"),
+        game_id=game_id,
+        game_name=game_name,
+        categories=categories,
+        category_segments=category_segments,
     )
 
 

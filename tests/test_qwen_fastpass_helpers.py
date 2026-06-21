@@ -19,6 +19,7 @@ def test_analysis_prompt_accepts_fast_pass_evidence_context():
         start=100,
         end=160,
         streamer_profile_context="PROFILE",
+        game_knowledge_context="GAME CONTEXT: 7 Days to Die",
         phase1_title_research_summary="TITLE SUMMARY",
         phase1_title_examples="TITLE EXAMPLES",
         transcript="transcript",
@@ -32,6 +33,8 @@ def test_analysis_prompt_accepts_fast_pass_evidence_context():
     assert "trigger: donation alert fires" in prompt
     assert "gemma_annotation_refs" in prompt
     assert "possibly_transactional" in prompt
+    assert "GAME CONTEXT: 7 Days to Die" in prompt
+    assert "GAME-CONTEXT RULES" in prompt
 
 
 def test_sample_clip_frames_fast_pass_uses_trim_aware_nearest_frames(tmp_path, monkeypatch):
@@ -111,15 +114,20 @@ def test_run_fast_pass_text_triage_uses_text_only_qwen_payload(monkeypatch):
         ]
     }
 
+    monkeypatch.setattr(mod, "_render_game_context_for_seconds", lambda state, seconds: "GAME CONTEXT: 7 Days to Die")
+
     candidates, stats = mod._run_fast_pass_text_triage(
         triage_chunks=triage_chunks,
         gemma_artifact=gemma_artifact,
         mode="gemma-enriched",
+        game_context_state={"enabled": True},
     )
 
     assert stats["qwen_text_calls"] == 1
     assert isinstance(payloads[0]["messages"][0]["content"], str)
     assert "GEMMA_EVIDENCE" in payloads[0]["messages"][0]["content"]
+    assert "GAME_CONTEXT" in payloads[0]["messages"][0]["content"]
+    assert "7 Days to Die" in payloads[0]["messages"][0]["content"]
     assert candidates[0]["candidate_id"] == "triage_100"
     assert candidates[0]["start"] == 100
     assert candidates[0]["end"] == 150

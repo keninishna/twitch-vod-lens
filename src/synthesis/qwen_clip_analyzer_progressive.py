@@ -32,6 +32,9 @@ import time
 import argparse
 from pathlib import Path
 
+from src.intelligence.game_category import resolve_game_for_timestamp, resolve_game_segments
+from src.intelligence.game_knowledge_context import render_game_knowledge_context
+from src.intelligence.game_knowledge_fetch import gather_game_knowledge
 from src.intelligence.profile_context import render_streamer_profile_context
 from src.intelligence.profile_update import (
     apply_profile_update_auto,
@@ -159,6 +162,15 @@ UPDATE_STREAMER_PROFILE = os.environ.get("UPDATE_STREAMER_PROFILE", "0").lower()
     "on",
 }
 PROFILE_UPDATE_MODE = os.environ.get("PROFILE_UPDATE_MODE", "propose")
+ENABLE_GAME_KNOWLEDGE = os.environ.get("ENABLE_GAME_KNOWLEDGE", "1").lower() not in {"0", "false", "no", "off"}
+GAME_KNOWLEDGE_ROOT = Path(os.environ.get("GAME_KNOWLEDGE_ROOT", "data/game_knowledge"))
+GAME_KNOWLEDGE_REFRESH_DAYS = int(os.environ.get("GAME_KNOWLEDGE_REFRESH_DAYS", 30))
+GAME_KNOWLEDGE_REQUIRED = os.environ.get("GAME_KNOWLEDGE_REQUIRED", "0").lower() in {"1", "true", "yes", "on"}
+GAME_NAME_OVERRIDE = os.environ.get("GAME_NAME")
+GAME_ID_OVERRIDE = os.environ.get("GAME_ID")
+GAME_CATEGORY_TIMELINE = os.environ.get("GAME_CATEGORY_TIMELINE")
+TWITCH_CLIENT_ID = os.environ.get("TWITCH_CLIENT_ID")
+TWITCH_CLIENT_SECRET = os.environ.get("TWITCH_CLIENT_SECRET")
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -287,6 +299,164 @@ def qwen_call(payload, timeout=180):
         return {"error": str(e), "clip_worthy": 0}
 
 
+def _load_game_category_timeline(path: str | None) -> list[dict]:
+    if not path:
+        return []
+    payload = load_json(Path(path))
+    if not isinstance(payload, list):
+        raise ValueError(f"Game category timeline must be a JSON list: {path}")
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _game_profile_key(segment: dict) -> str:
+    return str(segment.get("game_name") or segment.get("game_id") or "").strip()
+
+
+def _build_game_context_state(vod_meta: dict, vod_dir: Path) -> dict:
+    artifact_path = Path(vod_dir) / f"game_context_{VOD_ID}.json"
+    if not ENABLE_GAME_KNOWLEDGE:
+        state = {
+            "enabled": False,
+            "artifact_path": str(artifact_path),
+            "segments": [],
+            "profiles_by_game_name": {},
+            "warnings": ["Game knowledge disabled for this run."],
+        }
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text(json.dumps({k: v for k, v in state.items() if k != "profiles_by_game_name"}, indent=2))
+        return state
+
+    warnings: list[str] = []
+    overrides: dict = {}
+    if GAME_NAME_OVERRIDE:
+        overrides["game_name"] = GAME_NAME_OVERRIDE
+    if GAME_ID_OVERRIDE:
+        overrides["game_id"] = GAME_ID_OVERRIDE
+    try:
+        timeline = _load_game_category_timeline(GAME_CATEGORY_TIMELINE)
+        if timeline:
+            overrides["category_segments"] = timeline
+    except Exception as exc:
+        message = f"Failed to load game category timeline: {exc}"
+        if GAME_KNOWLEDGE_REQUIRED:
+            raise
+        warnings.append(message)
+
+    segments = resolve_game_segments(vod_meta or {}, overrides or None)
+    profiles_by_game_name: dict[str, dict] = {}
+    serial_profiles: list[dict] = []
+
+    for segment in segments:
+        game_name = segment.game_name
+        if not game_name or game_name in profiles_by_game_name:
+            continue
+        try:
+            profile, meta = gather_game_knowledge(
+                game_name,
+                GAME_KNOWLEDGE_ROOT,
+                client_id=TWITCH_CLIENT_ID,
+                client_secret=TWITCH_CLIENT_SECRET,
+                refresh_days=GAME_KNOWLEDGE_REFRESH_DAYS,
+            )
+            profile_warnings = list(meta.get("warnings") or []) if isinstance(meta, dict) else []
+            cache_status = str(meta.get("cache_status", "unknown")) if isinstance(meta, dict) else "unknown"
+            profiles_by_game_name[game_name] = {
+                "profile": profile,
+                "cache_status": cache_status,
+                "warnings": profile_warnings,
+                "path": meta.get("path") if isinstance(meta, dict) else None,
+            }
+            serial_profiles.append(
+                {
+                    "game_name": game_name,
+                    "slug": getattr(profile, "slug", None),
+                    "game_id": getattr(profile, "game_id", None),
+                    "cache_status": cache_status,
+                    "path": meta.get("path") if isinstance(meta, dict) else None,
+                    "warnings": profile_warnings,
+                }
+            )
+            warnings.extend(profile_warnings)
+        except Exception as exc:
+            message = f"Failed to gather game knowledge for {game_name}: {exc}"
+            if GAME_KNOWLEDGE_REQUIRED:
+                raise
+            warnings.append(message)
+            profiles_by_game_name[game_name] = {
+                "profile": None,
+                "cache_status": "missing",
+                "warnings": [message],
+                "path": None,
+            }
+            serial_profiles.append({"game_name": game_name, "cache_status": "missing", "warnings": [message]})
+
+    state = {
+        "enabled": True,
+        "artifact_path": str(artifact_path),
+        "segments": [s.model_dump() for s in segments],
+        "profiles_by_game_name": profiles_by_game_name,
+        "profiles": serial_profiles,
+        "warnings": warnings,
+    }
+    artifact_payload = {
+        "enabled": True,
+        "artifact_path": str(artifact_path),
+        "segments": state["segments"],
+        "profiles": serial_profiles,
+        "warnings": warnings,
+    }
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(json.dumps(artifact_payload, indent=2))
+    return state
+
+
+def _render_game_context_for_seconds(state: dict | None, seconds: float) -> str:
+    if not state or not state.get("enabled"):
+        return "GAME CONTEXT (evidence-backed, advisory): unavailable or disabled for this run."
+    segments = state.get("segments") or []
+    segment_objs = []
+    for item in segments:
+        try:
+            from src.intelligence.game_knowledge_types import GameCategorySegment
+            segment_objs.append(GameCategorySegment.model_validate(item))
+        except Exception:
+            continue
+    segment = resolve_game_for_timestamp(segment_objs, seconds)
+    if segment is None:
+        return render_game_knowledge_context(None, None)
+    entry = (state.get("profiles_by_game_name") or {}).get(segment.game_name, {})
+    profile = entry.get("profile") if isinstance(entry, dict) else None
+    return render_game_knowledge_context(profile, segment)
+
+
+def _render_game_run_context(state: dict | None, max_chars: int = 2000) -> str:
+    if not state or not state.get("enabled"):
+        return "GAME KNOWLEDGE CONTEXT: unavailable or disabled for this run."
+    lines = ["GAME KNOWLEDGE CONTEXT (evidence-backed, advisory run summary):"]
+    profiles = state.get("profiles") or []
+    status_by_name = {p.get("game_name"): p.get("cache_status", "unknown") for p in profiles if isinstance(p, dict)}
+    for name, entry in (state.get("profiles_by_game_name") or {}).items():
+        if isinstance(entry, dict) and name not in status_by_name:
+            status_by_name[name] = entry.get("cache_status", "unknown")
+    for seg in state.get("segments") or []:
+        if not isinstance(seg, dict):
+            continue
+        name = seg.get("game_name") or "unknown"
+        start = seg.get("start", 0)
+        end = seg.get("end")
+        status = status_by_name.get(name, "unknown")
+        span = f"{start}s-{end}s" if end is not None else f"{start}s-end"
+        lines.append(f"- {name} ({span}, source={seg.get('source','unknown')}, cache_status={status})")
+    warnings = state.get("warnings") or []
+    if warnings:
+        lines.append(f"Warnings: {warnings[:3]}")
+    lines.append("Use this only as background; transcript/chat/frames remain authoritative.")
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        return text[: max(0, max_chars - 3)].rstrip() + "..."
+    return text
+
+
 def _to_int_or_none(v):
     try:
         return int(float(v))
@@ -401,7 +571,7 @@ def _build_fast_pass_evidence_block(candidate: dict | None) -> str:
     return "\n".join(lines)
 
 
-def _fast_pass_text_triage_prompt(*, chunk: dict, gemma_summary: dict, mode: str) -> str:
+def _fast_pass_text_triage_prompt(*, chunk: dict, gemma_summary: dict, mode: str, game_context: str = "") -> str:
     transcript_lines = chunk.get("transcript_lines") or []
     chat_messages = chunk.get("chat_messages") or []
     gemma_evidence = gemma_summary.get("evidence_lines") or []
@@ -410,6 +580,7 @@ def _fast_pass_text_triage_prompt(*, chunk: dict, gemma_summary: dict, mode: str
         "Use transcript/chat chunks plus Gemma evidence, but verify/correct Gemma evidence rather than trusting it blindly. "
         "Return valid JSON only with a top-level object containing a 'candidates' array.\n\n"
         f"FAST_PASS_MODE={mode}\n"
+        f"GAME_CONTEXT={game_context or 'GAME CONTEXT (evidence-backed, advisory): unavailable.'}\n"
         f"CHUNK_START={chunk.get('chunk_start')}\nCHUNK_END={chunk.get('chunk_end')}\n\n"
         f"TRANSCRIPT_LINES={json.dumps(transcript_lines, ensure_ascii=False)}\n\n"
         f"CHAT_MESSAGES={json.dumps(chat_messages, ensure_ascii=False)}\n\n"
@@ -431,7 +602,7 @@ def _normalize_fast_pass_triage_candidates(raw_candidates: list[dict], fallback_
     return normalized[: max(0, limit)]
 
 
-def _run_fast_pass_text_triage(*, triage_chunks: list[dict], gemma_artifact: dict, mode: str) -> tuple[list[dict], dict]:
+def _run_fast_pass_text_triage(*, triage_chunks: list[dict], gemma_artifact: dict, mode: str, game_context_state: dict | None = None) -> tuple[list[dict], dict]:
     gemma_windows = gemma_artifact.get("windows", []) if isinstance(gemma_artifact, dict) else []
     qwen_text_calls = 0
     candidates: list[dict] = []
@@ -441,7 +612,8 @@ def _run_fast_pass_text_triage(*, triage_chunks: list[dict], gemma_artifact: dic
         matching_windows = [w for w in gemma_windows if isinstance(w, dict) and _as_int(w.get("start"), -1) < chunk_end and _as_int(w.get("end"), -1) > chunk_start]
         gemma_summary = summarize_gemma_signals_for_triage(matching_windows)
         gemma_summary["annotation_refs"] = [w.get("window_id") for w in matching_windows if w.get("window_id")]
-        prompt = _fast_pass_text_triage_prompt(chunk=chunk, gemma_summary=gemma_summary, mode=mode)
+        game_context = _render_game_context_for_seconds(game_context_state, chunk_start)
+        prompt = _fast_pass_text_triage_prompt(chunk=chunk, gemma_summary=gemma_summary, mode=mode, game_context=game_context)
         payload = {"model": QWEN_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": 4096, "temperature": 0.1}
         qwen_text_calls += 1
         response = qwen_call(payload)
@@ -703,6 +875,13 @@ IMPORTANT CONTEXT FOR UNDERSTANDING THE STREAM:
 
 {streamer_profile_context}
 
+{game_knowledge_context}
+
+GAME-CONTEXT RULES:
+- Use game context to decode mechanics, items, enemies, objectives, and jargon.
+- Do not invent game events; only mention game events if transcript/chat/frames support them.
+- If game context makes a moment more meaningful, cite the specific evidence.
+
 PHASE 1 TITLE RESEARCH BRIEF:
 {phase1_title_research_summary}
 
@@ -758,7 +937,7 @@ Analyse these specific frames and return valid JSON only:
       "suggested_penalty": "-0.5 to -5.0"
     }}
   ],
-  "clip_point": "CLICK-WORTHY TITLE (max 12 words). Must follow PHASE 1 TITLE RESEARCH BRIEF and be evidence-grounded in trigger+payoff. Avoid duplicate words or repeated phrase structures (e.g. 'next to the X next to the Y').",
+  "clip_point": "CLICK-WORTHY TITLE (max 12 words, 1 sentence). Use ONE of these proven patterns: PATTERN 1 — '[Streamer] [reaction] after [trigger]': ✓ 'Streamer loses it after discovering her donation sound is broken' ✓ 'Chat absolutely roasts her for this simple mistake'. PATTERN 2 — 'Girl [verb] [something] and [surprise]': ✓ 'Girl gets real about why running on empty hits different' ✓ 'Girl thought she muted her mic... she did not'. PATTERN 3 — 'The moment [streamer] realized [reveal]': ✓ 'The moment she realized chat knew more than she did'. PATTERN 4 — Question bait: ✓ 'What happens when you ask chat to explain an inside joke?' ✓ 'Can she keep a straight face? (spoiler: no)'. PATTERN 5 — Short + punchy: ✓ 'She had ONE job' ✓ 'This chat needs to be stopped'. DON'Ts — dry descriptions: ✗ 'Streamer reacts to donation alert' ✗ 'Streamer explains why she's tired'. Must be evidence-grounded in trigger+payoff. Avoid duplicate words or repeated phrase structures.",
   "title_why": "1 sentence: why this title balances specificity + curiosity and remains accurate to the clip evidence.",
   "speaker_framing_assessment": {{
     "primary_speaker_identity": "streamer|guest|chat|unknown|mixed",
@@ -815,9 +994,11 @@ HIGH-SCORE GATE:
   (3) non-transactional narrative value.
 
 TITLE RULE (Stage 1):
-- Provide clip_point for every clip.
-- clip_point must be <=12 words, evidence-grounded in trigger+payoff, avoid dry metadata phrasing, and avoid duplicate words or repeated phrase structures.
-- For chat-read clips, keep attribution to chat while preserving hook quality.
+- Provide clip_point for every clip (max 12 words, 1 sentence).
+- Use ONE of these patterns: reaction-based ('[Streamer] [reaction] after [trigger]'), question bait ('What happens when...?'), short + punchy ('She had ONE job'), or the surprise format ('Girl [verb] [something] and [surprise]').
+- NO dry descriptions: ✗ 'Streamer reads chat about...' ✗ 'Streamer talks about...' ✗ 'Streamer reacts to...'
+- For chat-read clips, keep attribution but make it hooky (e.g. 'What happens when chat drops a message about ...?').
+- Avoid duplicate words, repeated phrase structures, and metadata-style phrasing.
 
 CLIP CRITICISM RULE (Stage 1):
 - Populate failure_modes with any applicable structural/context/pacing/transactional/technical failures.
@@ -836,6 +1017,9 @@ Here is the complete analysis log from every batch:
 
 Audio analysis context:
 {audio_context}
+
+Game knowledge context:
+{game_run_context}
 
 Now produce a provisional ranked synthesis. You may recommend ANY number of clips (0 to {total_clips}) — there is no fixed limit. Only include clips that are genuinely worth clipping.
 
@@ -943,6 +1127,9 @@ FINAL_SYNTHESIS_PROMPT = """Here is the COMPLETE analysis log for the VOD "{vod_
 Audio analysis context:
 {audio_context}
 
+Game knowledge context:
+{game_run_context}
+
 Produce the FINAL ranked synthesis. Recommend any number of clips (0 to {total_clips}) — no fixed cap. Only include clips genuinely worth clipping.
 
 Return valid JSON only:
@@ -968,7 +1155,7 @@ Return valid JSON only:
       "duration_penalty_applied": "INTEGER 0..3 based on DURATION POLICY below (0 optimal, 3 worst)",
       "trim_start_reason": "Cite the exact trigger at this second.",
       "trim_end_reason": "Cite what resolves/ends at this second.",
-      "clip_point": "CLICK-WORTHY TITLE (1 sentence max). Use a proven pattern: reaction-based ('Streamer [reaction] after [trigger]'), question bait ('What happens when...?'), or short + punchy ('She had ONE job'). NO dry descriptions. For chat-read clips, keep attribution but make it hooky (e.g. 'What happens when chat drops a message about ...?'). Avoid duplicate words or repeated phrase structures.",
+      "clip_point": "CLICK-WORTHY TITLE (1 sentence max). Use ONE of these proven patterns: PATTERN 1 — '[Streamer] [reaction] after [trigger]' (✓ 'Chat absolutely roasts her for this simple mistake'). PATTERN 2 — 'Girl [verb] [something] and [surprise]' (✓ 'Girl thought she muted her mic... she did not'). PATTERN 3 — 'The moment [streamer] realized [reveal]'. PATTERN 4 — Question bait (✓ 'What happens when you ask chat to explain an inside joke?'). PATTERN 5 — Short + punchy (✓ 'She had ONE job' ✓ 'This chat needs to be stopped'). NO dry descriptions — ✗ 'Streamer reacts to donation alert'. For chat-read clips, keep attribution but make it hooky (e.g. 'What happens when chat drops a message about ...?'). Avoid duplicate words or repeated phrase structures.",
     }}
   ],
   "overall_vod_assessment": "final summary paragraph",
@@ -980,7 +1167,7 @@ IMPORTANT RULES:
 - "final_selected_clips" can be empty, 1, or many. No fixed limit on the number of clips.
 - NARRATIVE QUALITY matters more than emotional energy. Prioritize clips with stories, chat banter, or organic moments over transactional reactions.
 - DEDUP RULE: Each clip has a unique clip_id (e.g. 'Clip at 998s'). NEVER assign the same clip_point/title to two different clips. Each clip MUST have a unique title. Differentiate similar clips by focusing on what makes each moment distinct.
-- TITLE RULE: clip_point must be click-worthy (reaction, question-bait, or punchy one-liner). Keep factual attribution in analysis fields, but title must maximize curiosity. For chat-read clips, keep attribution while still hooky (e.g. 'What happens when chat drops a message about ...?'). Avoid dry forms like 'Streamer reads a chat message about ...' and avoid duplicate words or repeated phrase structures.
+- TITLE RULE: clip_point must be click-worthy. Use ONE of: reaction-based ('[Streamer] [reaction] after [trigger]'), question bait ('What happens when...?'), short+punchy ('She had ONE job'), or surprise reveal ('Girl [verb] [something] and [surprise]'). NO dry forms like 'Streamer reads a chat message about ...'. For chat-read clips, keep attribution while still hooky (e.g. 'What happens when chat drops a message about ...?'). Avoid duplicate words or repeated phrase structures.
 - SPEAKER-FRAMING RULE: infer whether streamer is actually speaking from speaker-attribution context in the analysis log. If primary voice is guest/non-streamer, do not frame title as streamer reaction unless streamer speech is the payoff. Guest-led clips can still be selected when accurately attributed.
 - SPEAKER POLICY: do not assume deterministic speaker-specific penalties/gates in Python; handle this through title/report inference and attribution-risk reasoning.
 - DEAD AIR RULE: Check for ⚠️ DEAD AIR DETECTED in the analysis log. If a single silence gap > 20 seconds exists, that clip must take a -3 penalty with a cap at 6/10. If total silence > 30% of window, score ≤ 5. Discard clips with unacceptable dead air. Ambient atmosphere is NOT dead air — differentiate.
@@ -1141,7 +1328,7 @@ def _build_fast_pass_candidate(clip: dict, gemma_summary: dict | None = None) ->
     return candidate
 
 
-def _build_fast_pass_artifacts(*, fusion: dict, manifest: dict, clips: list[dict], phase4_dir: Path, speaker_attribution: dict | None, dry_run: bool) -> dict:
+def _build_fast_pass_artifacts(*, fusion: dict, manifest: dict, clips: list[dict], phase4_dir: Path, speaker_attribution: dict | None, dry_run: bool, game_context_state: dict | None = None) -> dict:
     started_at = time.time()
     triage_chunks = build_triage_chunks(
         fusion.get("transcript", {}).get("segments", []),
@@ -1189,6 +1376,7 @@ def _build_fast_pass_artifacts(*, fusion: dict, manifest: dict, clips: list[dict
         triage_chunks=triage_chunks,
         gemma_artifact=gemma_artifact,
         mode=FAST_PASS_MODE,
+        game_context_state=game_context_state,
     )
 
     if not triage_candidates and FAST_PASS_MODE != "text-only":
@@ -1287,6 +1475,10 @@ def run():
 
     clips.sort(key=lambda c: c["start"])
     original_clip_count = len(clips)
+    vod_meta = fusion.get("vod_meta") if isinstance(fusion, dict) else {}
+    game_context_state = _build_game_context_state(vod_meta or {}, VOD_DIR)
+    if game_context_state.get("artifact_path"):
+        log(f"Loaded game knowledge context artifact: {game_context_state['artifact_path']}")
 
     fast_pass_state = None
     fast_pass_run_started_at = None
@@ -1317,6 +1509,7 @@ def run():
                     phase4_dir=VOD_DIR,
                     speaker_attribution=speaker_attribution,
                     dry_run=FAST_PASS_DRY_RUN or GEMMA_SMOKE_TEST_ONLY,
+                    game_context_state=game_context_state,
                 )
                 if FAST_PASS_DRY_RUN or GEMMA_SMOKE_TEST_ONLY:
                     log(f"Fast-pass dry-run complete: {fast_pass_state['gemma']['artifact_path']}")
@@ -1329,6 +1522,7 @@ def run():
                             **fast_pass_state,
                             "gemma_backend": fast_pass_state['gemma']['backend'],
                         },
+                        "game_context": {k: v for k, v in game_context_state.items() if k != "profiles_by_game_name"},
                     }
                     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
                     with open(OUTPUT_PATH, "w") as f:
@@ -1364,7 +1558,6 @@ def run():
     streamer_profile_context = (
         "STREAMER PROFILE CONTEXT (evidence-backed, advisory): unavailable for this run."
     )
-    vod_meta = fusion.get("vod_meta") if isinstance(fusion, dict) else {}
     streamer_identity = resolve_streamer_id_context(vod_meta or {}, STREAMER_ID_OVERRIDE)
     streamer_id_for_run = streamer_identity["streamer_id"]
     streamer_profile = None
@@ -1457,6 +1650,7 @@ def run():
                 fast_pass_evidence_context=fast_pass_evidence_context,
                 batch_context=batch_context,
                 streamer_profile_context=streamer_profile_context,
+                game_knowledge_context=_render_game_context_for_seconds(game_context_state, clip["start"]),
                 phase1_title_research_summary=PHASE1_TITLE_RESEARCH_SUMMARY,
                 phase1_title_examples=PHASE1_TITLE_EXAMPLES,
                 platform_guide=PLATFORM_SCORING_GUIDE,
@@ -1673,6 +1867,7 @@ def run():
                 complete_log=complete_log,
                 vod_id=VOD_ID,
                 audio_context=audio_context,
+                game_run_context=_render_game_run_context(game_context_state),
                 platform_guide=PLATFORM_SCORING_GUIDE,
             )
         }],
@@ -1837,6 +2032,7 @@ def run():
                     vod_id=VOD_ID,
                     frames_requested_count=frames_served,
                     audio_context=audio_context,
+                    game_run_context=_render_game_run_context(game_context_state),
                     platform_guide=PLATFORM_SCORING_GUIDE,
                 )
             }],
@@ -1938,6 +2134,7 @@ def run():
         "provisional_ranking": provisional,
         "final_ranking": final_synthesis,
         "fast_pass": fast_pass_state if fast_pass_state else {"enabled": False},
+        "game_context": {k: v for k, v in game_context_state.items() if k != "profiles_by_game_name"},
     }
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

@@ -13,8 +13,10 @@ def test_analysis_prompt_renders_single_brace_json_schema():
         transcript="hello",
         chat_messages="none",
         yolo_objects="person",
+        fast_pass_evidence_context="",
         batch_context="none",
         streamer_profile_context="profile context",
+        game_knowledge_context="game context",
         phase1_title_research_summary="summary",
         phase1_title_examples="examples",
         platform_guide="guide",
@@ -35,6 +37,7 @@ def test_provisional_prompt_renders_single_brace_json_schema():
         streamer="streamer",
         complete_log="log",
         audio_context="audio",
+        game_run_context="game run context",
         vod_id="123",
     )
 
@@ -49,6 +52,7 @@ def test_final_prompt_renders_single_brace_json_schema():
         streamer="streamer",
         complete_log="log",
         audio_context="audio",
+        game_run_context="game run context",
         total_clips=3,
         vod_id="123",
         frames_requested_count=0,

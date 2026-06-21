@@ -11,6 +11,8 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, model_validator
 from typing import Dict, List, Literal, Optional
 
+from src.intelligence.game_knowledge_types import GameCategorySegment
+
 
 class VodMeta(BaseModel):
     """Metadata about a VOD, extracted from yt-dlp or Twitch API."""
@@ -22,6 +24,10 @@ class VodMeta(BaseModel):
     resolution: Optional[str] = None
     fps: Optional[float] = None
     format: Optional[str] = None
+    game_id: Optional[str] = None
+    game_name: Optional[str] = None
+    categories: List[str] = Field(default_factory=list)
+    category_segments: List[GameCategorySegment] = Field(default_factory=list)
 
 
 class TranscriptSegment(BaseModel):

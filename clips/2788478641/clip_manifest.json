@@ -1,0 +1,46 @@
+{
+  "vod_id": "2788478641",
+  "broadcaster_id": "201564210",
+  "editor_id": "19291562",
+  "streamer": "lostgirls27",
+  "created": "2026-06-08",
+  "clips_created": 3,
+  "clips_failed": 2,
+  "failed_details": "Clip 1 (She forgot clothes, transcript @ 300s) and Clip 3 (Pot donation, transcript @ 18372s) failed to materialize via Helix VOD Clip endpoint across 5+ offset attempts each. Early VOD offset dead zone and some mid-VOD positions are prone to async processing failure.",
+  "use_drift_formula": true,
+  "drift_rate": 0.005,
+  "helix_shift": 8,
+  "notes": "Drift formula: vod_offset = transcript_offset + (transcript_offset * 0.005) + 8. Set `use_drift_formula` to false for the old simpler formula.",
+  "clips": {
+    "pumpkin": {
+      "title": "Guest almost kills streamer with a pumpkin for the memes",
+      "url": "https://www.twitch.tv/lostgirls27/clip/LittleTenderCookieFloof-SGKY35Sx6SUcXEQ0",
+      "vod_offset_seconds": 6300,
+      "vod_position": "1:45:00",
+      "duration_seconds": 40,
+      "transcript_target_offset": 6271,
+      "drift_applied": 31,
+      "helix_request_offset": 6310
+    },
+    "guest_hairy_butthole": {
+      "title": "Guest admits to having a hairy butthole on stream",
+      "url": "https://www.twitch.tv/lostgirls27/clip/AlluringAgreeableGarbageKeyboardCat-ddbKSmIWRol6MJ4q",
+      "vod_offset_seconds": 18692,
+      "vod_position": "5:11:32",
+      "duration_seconds": 56,
+      "transcript_target_offset": 18600,
+      "drift_applied": 93,
+      "helix_request_offset": 18701
+    },
+    "donor_butt_laser": {
+      "title": "Donor offers to fly for a butt laser session",
+      "url": "https://www.twitch.tv/lostgirls27/clip/FunnyFastBaguetteBibleThump-bpQDU1fIkt5ImURK",
+      "vod_offset_seconds": 18976,
+      "vod_position": "5:16:16",
+      "duration_seconds": 58,
+      "transcript_target_offset": 18876,
+      "drift_applied": 94,
+      "helix_request_offset": 18978
+    }
+  }
+}
